@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed LLM - Compute Node</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+            background: #0a0a0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #7c3aed; margin-bottom: 0.5rem; font-size: 1.8rem; }
+        .subtitle { color: #666; margin-bottom: 2rem; }
+
+        .card {
+            background: #15151f;
+            border: 1px solid #2a2a3a;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        .card h2 { font-size: 1rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem; }
+
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #1e1e2e;
+        }
+        .status-row:last-child { border-bottom: none; }
+        .label { color: #888; }
+        .value { font-weight: 600; font-family: monospace; }
+
+        .status-dot {
+            display: inline-block;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .dot-green { background: #22c55e; box-shadow: 0 0 8px #22c55e55; }
+        .dot-yellow { background: #eab308; box-shadow: 0 0 8px #eab30855; }
+        .dot-red { background: #ef4444; box-shadow: 0 0 8px #ef444455; }
+        .dot-gray { background: #666; }
+
+        #log {
+            background: #0d0d14;
+            border: 1px solid #1e1e2e;
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: monospace;
+            font-size: 0.85rem;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.6;
+        }
+        .log-info { color: #60a5fa; }
+        .log-ok { color: #22c55e; }
+        .log-warn { color: #eab308; }
+        .log-err { color: #ef4444; }
+
+        .btn {
+            background: #7c3aed;
+            color: white;
+            border: none;
+            padding: 0.75rem 2rem;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 1rem;
+        }
+        .btn:hover { background: #6d28d9; }
+        .btn:disabled { background: #333; cursor: not-allowed; }
+        .btn-stop { background: #dc2626; }
+        .btn-stop:hover { background: #b91c1c; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Distributed LLM Compute Node</h1>
+        <p class="subtitle">Your browser becomes a GPU compute node via WebGPU</p>
+
+        <!-- GPU Info -->
+        <div class="card">
+            <h2>GPU Hardware</h2>
+            <div class="status-row">
+                <span class="label">WebGPU Support</span>
+                <span class="value" id="webgpu-support">Checking...</span>
+            </div>
+            <div class="status-row">
+                <span class="label">GPU Adapter</span>
+                <span class="value" id="gpu-name">-</span>
+            </div>
+            <div class="status-row">
+                <span class="label">Architecture</span>
+                <span class="value" id="gpu-arch">-</span>
+            </div>
+            <div class="status-row">
+                <span class="label">Max Buffer Size</span>
+                <span class="value" id="gpu-buffer">-</span>
+            </div>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="card">
+            <h2>Connection</h2>
+            <div class="status-row">
+                <span class="label">Orchestrator</span>
+                <span class="value" id="ws-status">
+                    <span class="status-dot dot-gray"></span> Disconnected
+                </span>
+            </div>
+            <div class="status-row">
+                <span class="label">Node ID</span>
+                <span class="value" id="node-id">-</span>
+            </div>
+            <div class="status-row">
+                <span class="label">Assigned Layers</span>
+                <span class="value" id="layers">-</span>
+            </div>
+            <div class="status-row">
+                <span class="label">Status</span>
+                <span class="value" id="node-status">Idle</span>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div style="display: flex; gap: 1rem;">
+            <button class="btn" id="btn-start" onclick="startNode()">Connect & Start</button>
+            <button class="btn btn-stop" id="btn-stop" onclick="stopNode()" disabled>Stop</button>
+        </div>
+
+        <!-- Log -->
+        <div class="card" style="margin-top: 1rem;">
+            <h2>Log</h2>
+            <div id="log"></div>
+        </div>
+    </div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────
+const WS_URL = "{{ ws_url }}";
+let ws = null;
+let nodeId = crypto.randomUUID();
+let gpuDevice = null;
+let gpuInfo = {};
+let heartbeatInterval = null;
+let assignedLayers = null;
+
+// ── Logging ────────────────────────────────────────────────────────
+function log(msg, level = "info") {
+    const el = document.getElementById("log");
+    const time = new Date().toLocaleTimeString();
+    const cls = { info: "log-info", ok: "log-ok", warn: "log-warn", error: "log-err" }[level] || "log-info";
+    el.innerHTML += `<div class="${cls}">[${time}] ${msg}</div>`;
+    el.scrollTop = el.scrollHeight;
+}
+
+// ── WebGPU Detection ───────────────────────────────────────────────
+async function detectGPU() {
+    const supportEl = document.getElementById("webgpu-support");
+
+    if (!navigator.gpu) {
+        supportEl.innerHTML = '<span class="status-dot dot-red"></span> Not available';
+        log("WebGPU not supported in this browser", "error");
+        return false;
+    }
+
+    try {
+        const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+        if (!adapter) {
+            supportEl.innerHTML = '<span class="status-dot dot-red"></span> No adapter';
+            log("No WebGPU adapter found", "error");
+            return false;
+        }
+
+        const info = await adapter.requestAdapterInfo();
+        gpuInfo = {
+            gpu_name: info.description || info.device || info.vendor || "Unknown GPU",
+            architecture: info.architecture || "unknown",
+            vendor: info.vendor || "unknown",
+        };
+
+        // Request device with max limits
+        gpuDevice = await adapter.requestDevice({
+            requiredLimits: {
+                maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+                maxBufferSize: adapter.limits.maxBufferSize,
+            }
+        });
+
+        const maxBuf = gpuDevice.limits.maxBufferSize;
+        gpuInfo.gpu_vram_mb = Math.round(maxBuf / (1024 * 1024));
+
+        supportEl.innerHTML = '<span class="status-dot dot-green"></span> Available';
+        document.getElementById("gpu-name").textContent = gpuInfo.gpu_name;
+        document.getElementById("gpu-arch").textContent = gpuInfo.architecture;
+        document.getElementById("gpu-buffer").textContent = `${gpuInfo.gpu_vram_mb} MB`;
+        document.getElementById("node-id").textContent = nodeId.slice(0, 8);
+
+        log(`GPU detected: ${gpuInfo.gpu_name} (${gpuInfo.gpu_vram_mb} MB)`, "ok");
+        return true;
+
+    } catch (e) {
+        supportEl.innerHTML = '<span class="status-dot dot-red"></span> Error';
+        log(`WebGPU error: ${e.message}`, "error");
+        return false;
+    }
+}
+
+// ── WebSocket Connection ───────────────────────────────────────────
+function connectWS() {
+    ws = new WebSocket(WS_URL);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+        document.getElementById("ws-status").innerHTML =
+            '<span class="status-dot dot-green"></span> Connected';
+        log("Connected to orchestrator", "ok");
+
+        // Send registration
+        ws.send(JSON.stringify({
+            type: "register",
+            node_id: nodeId,
+            gpu_name: gpuInfo.gpu_name || "unknown",
+            gpu_vram_mb: gpuInfo.gpu_vram_mb || 0,
+            runtime: "webgpu",
+        }));
+
+        // Start heartbeat
+        heartbeatInterval = setInterval(sendHeartbeat, 5000);
+    };
+
+    ws.onmessage = (event) => {
+        if (typeof event.data === "string") {
+            const msg = JSON.parse(event.data);
+            handleMessage(msg);
+        } else {
+            // Binary data = activation tensor from another node
+            handleBinaryData(event.data);
+        }
+    };
+
+    ws.onclose = () => {
+        document.getElementById("ws-status").innerHTML =
+            '<span class="status-dot dot-yellow"></span> Disconnected';
+        log("Disconnected from orchestrator", "warn");
+        clearInterval(heartbeatInterval);
+
+        // Auto-reconnect after 5s
+        setTimeout(() => {
+            if (document.getElementById("btn-stop").disabled === false) {
+                log("Reconnecting...", "info");
+                connectWS();
+            }
+        }, 5000);
+    };
+
+    ws.onerror = (err) => {
+        log(`WebSocket error`, "error");
+    };
+}
+
+function handleMessage(msg) {
+    switch (msg.type) {
+        case "layer_assignment":
+            assignedLayers = [msg.start_layer, msg.end_layer];
+            document.getElementById("layers").textContent = `${msg.start_layer} - ${msg.end_layer}`;
+            document.getElementById("node-status").textContent = "Loading weights...";
+            log(`Assigned layers ${msg.start_layer}-${msg.end_layer} of ${msg.model_id}`, "info");
+
+            // Simulate weight loading (TODO: real weight download + WebGPU buffer loading)
+            setTimeout(() => {
+                ws.send(JSON.stringify({
+                    type: "layers_loaded",
+                    node_id: nodeId,
+                    start_layer: msg.start_layer,
+                    end_layer: msg.end_layer,
+                }));
+                document.getElementById("node-status").textContent = "Ready";
+                log(`Layers ${msg.start_layer}-${msg.end_layer} loaded into WebGPU`, "ok");
+            }, 2000);
+            break;
+
+        case "prefill_request":
+            log(`Prefill request: session=${msg.session_id}, ${msg.tokens.length} tokens`, "info");
+            document.getElementById("node-status").textContent = "Computing (prefill)...";
+            // TODO: Run actual WebGPU inference
+            handlePrefill(msg);
+            break;
+
+        case "decode_request":
+            log(`Decode: session=${msg.session_id}, token=${msg.token}`, "info");
+            document.getElementById("node-status").textContent = "Computing (decode)...";
+            // TODO: Run actual WebGPU inference
+            handleDecode(msg);
+            break;
+
+        case "session_end":
+            log(`Session ${msg.session_id} ended`, "info");
+            document.getElementById("node-status").textContent = "Ready";
+            break;
+
+        default:
+            log(`Unknown message type: ${msg.type}`, "warn");
+    }
+}
+
+function handleBinaryData(buffer) {
+    // Received activation tensor from a previous pipeline stage
+    const float16Array = new Float32Array(buffer); // TODO: use Float16 when available
+    log(`Received activation: ${float16Array.length} floats (${buffer.byteLength} bytes)`, "info");
+    // TODO: feed into WebGPU compute pipeline
+}
+
+// ── Inference Handlers (TODO: replace with real WebGPU compute) ────
+async function handlePrefill(msg) {
+    // Placeholder: simulate compute delay
+    await new Promise(r => setTimeout(r, 100));
+
+    // Simulate producing a hidden state [seq_len, 4096]
+    const hiddenSize = 4096;
+    const seqLen = msg.tokens.length;
+    const fakeHidden = new Float32Array(seqLen * hiddenSize);
+    // In real implementation: run transformer layers via WebGPU
+
+    ws.send(JSON.stringify({
+        type: "activation_result",
+        session_id: msg.session_id,
+        shape: [seqLen, hiddenSize],
+        dtype: "float32",
+    }));
+    ws.send(fakeHidden.buffer);
+    document.getElementById("node-status").textContent = "Ready";
+}
+
+async function handleDecode(msg) {
+    await new Promise(r => setTimeout(r, 10));
+
+    const hiddenSize = 4096;
+    const fakeHidden = new Float32Array(hiddenSize);
+
+    ws.send(JSON.stringify({
+        type: "activation_result",
+        session_id: msg.session_id,
+        shape: [1, hiddenSize],
+        dtype: "float32",
+    }));
+    ws.send(fakeHidden.buffer);
+    document.getElementById("node-status").textContent = "Ready";
+}
+
+// ── Heartbeat ──────────────────────────────────────────────────────
+function sendHeartbeat() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: "heartbeat",
+            node_id: nodeId,
+            cpu_usage: 0,
+            gpu_usage: 0,
+            ram_usage: 0,
+            active_sessions: 0,
+        }));
+    }
+}
+
+// ── Controls ───────────────────────────────────────────────────────
+async function startNode() {
+    document.getElementById("btn-start").disabled = true;
+    document.getElementById("btn-stop").disabled = false;
+
+    const gpuOk = await detectGPU();
+    if (!gpuOk) {
+        log("Cannot start: WebGPU not available. Try Chrome 113+ with a GPU.", "error");
+        document.getElementById("btn-start").disabled = false;
+        document.getElementById("btn-stop").disabled = true;
+        return;
+    }
+
+    connectWS();
+}
+
+function stopNode() {
+    document.getElementById("btn-start").disabled = false;
+    document.getElementById("btn-stop").disabled = true;
+
+    clearInterval(heartbeatInterval);
+    if (ws) {
+        ws.close();
+        ws = null;
+    }
+    document.getElementById("ws-status").innerHTML =
+        '<span class="status-dot dot-gray"></span> Disconnected';
+    document.getElementById("node-status").textContent = "Stopped";
+    log("Node stopped", "warn");
+}
+
+// ── Init ───────────────────────────────────────────────────────────
+detectGPU();
+</script>
+</body>
+</html>
