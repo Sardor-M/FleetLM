@@ -1,6 +1,6 @@
-# Distributed LLM Inference on Everyday Hardware
+# FleetLM — LLM Inference on a Fleet of Everyday Laptops
 
-We serve real LLM completions from consumer machines — laptops people already own — behind one OpenAI-compatible API. A lightweight orchestrator routes each request over a single outbound WebSocket to a node that holds the **entire model** in unified memory and streams tokens back. No datacenter GPU in the serving path, no inbound connections to any node, and a node dying mid-request costs one retry, not a session.
+FleetLM serves real LLM completions from consumer machines — laptops people already own — behind one OpenAI-compatible API. A lightweight orchestrator routes each request over a single outbound WebSocket to a node that holds the **entire model** in unified memory and streams tokens back. No datacenter GPU in the serving path, no inbound connections to any node, and a node dying mid-request costs one retry, not a session.
 
 The design follows one rule learned the hard way: **match the workload to what consumer hardware and home internet are actually good at** — memory-bound inference and throughput — and keep wide-area latency off the per-token critical path.
 

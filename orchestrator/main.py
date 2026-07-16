@@ -37,18 +37,18 @@ async def lifespan(app: FastAPI):
 
     # Start background heartbeat monitor
     heartbeat_task = asyncio.create_task(heartbeat_monitor(app.state.registry))
-    logger.info(f"Orchestrator started on {settings.host}:{settings.port}")
+    logger.info(f"FleetLM orchestrator started on {settings.host}:{settings.port}")
 
     yield
 
     # Shutdown
     heartbeat_task.cancel()
-    logger.info("Orchestrator shutting down")
+    logger.info("FleetLM orchestrator shutting down")
 
 
 app = FastAPI(
-    title="Distributed LLM Orchestrator",
-    description="Distribute LLM inference across browser-based WebGPU compute nodes",
+    title="FleetLM Orchestrator",
+    description="LLM inference served by a fleet of everyday laptops",
     version="0.1.0",
     lifespan=lifespan,
 )

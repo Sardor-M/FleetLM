@@ -140,7 +140,7 @@ async def list_models(request: Request):
     return {
         "object": "list",
         "data": [
-            {"id": model, "object": "model", "owned_by": "distributed-llm"}
+            {"id": model, "object": "model", "owned_by": "fleetlm"}
             for model in served
         ],
     }

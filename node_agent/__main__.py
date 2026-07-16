@@ -1,4 +1,4 @@
-"""Native compute node agent.
+"""FleetLM native compute node agent.
 
 Holds a whole model in memory and serves complete generations to the
 orchestrator over a single outbound WebSocket (NAT-friendly: the node never
@@ -71,7 +71,7 @@ class NodeAgent:
         self.outbox: asyncio.Queue[dict] = asyncio.Queue()
 
     async def run(self):
-        logger.info(f"Node agent starting (id={self.node_id[:8]})")
+        logger.info(f"FleetLM node agent starting (id={self.node_id[:8]})")
         logger.info(f"Hardware: {self.gpu_name}, {self.gpu_vram_mb} MB usable memory")
         logger.info(f"Engine: {self.engine.name}, model: {self.model_id}")
 

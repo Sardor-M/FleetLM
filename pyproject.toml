@@ -1,7 +1,7 @@
 [project]
-name = "distributed-llm"
+name = "fleetlm"
 version = "0.1.0"
-description = "Distributed LLM inference platform via browser WebGPU compute"
+description = "FleetLM: LLM inference served by a fleet of everyday laptops"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
