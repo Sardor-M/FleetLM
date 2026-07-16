@@ -25,21 +25,23 @@ def test_list_models(client):
     resp = client.get("/v1/models")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["data"][0]["id"] == "llama-3-8b"
+    # With no nodes connected, the configured default model is advertised
+    assert len(data["data"]) == 1
+    assert data["data"][0]["object"] == "model"
 
 
 def test_chat_completions_no_nodes(client):
     resp = client.post(
         "/v1/chat/completions",
         json={
-            "model": "llama-3-8b",
+            "model": "any-model",
             "messages": [{"role": "user", "content": "Hello"}],
         },
     )
     # Should return 503 since no nodes are available
     assert resp.status_code == 503
     data = resp.json()
-    assert "no_pipeline" in data["error"]["code"]
+    assert data["error"]["code"] == "no_capacity"
 
 
 def test_dashboard(client):

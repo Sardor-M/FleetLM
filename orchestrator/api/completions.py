@@ -1,89 +1,146 @@
-"""OpenAI-compatible /v1/chat/completions endpoint."""
+"""OpenAI-compatible /v1/chat/completions endpoint, served by whole-model nodes."""
 
 from __future__ import annotations
 
-import uuid
+import json
+import logging
+import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from sse_starlette.sse import EventSourceResponse
 
+from orchestrator.config import settings
 from orchestrator.protocol.messages import (
     ChatCompletionChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
+    MessageType,
+    SessionFailureCode,
     Usage,
 )
+from orchestrator.session.manager import SessionFailure
+
+logger = logging.getLogger("orchestrator.completions")
 
 router = APIRouter()
 
 
+def _error(status: int, message: str, code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"message": message, "type": "server_error", "code": code}},
+    )
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request):
-    """Handle B2B inference requests. OpenAI-compatible API."""
-    registry = request.app.state.registry
+    """Handle inference requests. OpenAI-compatible API."""
     session_mgr = request.app.state.session_manager
     pipeline_router = request.app.state.router
 
-    # Create a session
-    session = session_mgr.create(
-        model=req.model,
-        temperature=req.temperature,
-        max_tokens=req.max_tokens,
-    )
-
-    # Try to find a pipeline route
-    pipeline = pipeline_router.find_route(session)
-
-    if not pipeline:
-        session_mgr.remove(session.id)
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": {
-                    "message": f"No complete pipeline available. "
-                    f"{registry.ready_count} nodes ready but cannot cover all layers.",
-                    "type": "server_error",
-                    "code": "no_pipeline",
-                }
-            },
+    node = pipeline_router.find_generation_node(req.model)
+    if node is None:
+        return _error(
+            503,
+            "No compute node is currently serving a model. "
+            "Start a node with: python -m node_agent",
+            SessionFailureCode.NO_CAPACITY,
         )
 
-    # TODO Phase 2: Actually route through the pipeline
-    # For now, return a placeholder showing the pipeline we found
-    pipeline_desc = " -> ".join(
-        f"Node({n.node_id[:8]}, L{n.layers[0]}-{n.layers[1]})"
-        for n in pipeline
+    session = session_mgr.create(
+        model=node.model_id or req.model,
+        node_id=node.node_id,
+        max_tokens=req.max_tokens,
+        temperature=req.temperature,
     )
+    node.active_sessions += 1
 
-    response = ChatCompletionResponse(
+    try:
+        await node.ws.send_json({
+            "type": MessageType.GENERATE_REQUEST,
+            "session_id": session.id,
+            "messages": [m.model_dump() for m in req.messages],
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+        })
+    except Exception as e:
+        node.active_sessions -= 1
+        session_mgr.remove(session.id)
+        logger.error(f"Failed to dispatch to node {node.node_id[:8]}: {e}")
+        return _error(502, "Failed to reach the serving node.", SessionFailureCode.NODE_ERROR)
+
+    if req.stream:
+        return EventSourceResponse(
+            _stream_response(session, node, session_mgr),
+            media_type="text/event-stream",
+        )
+
+    try:
+        parts: list[str] = []
+        async for chunk in session.stream():
+            parts.append(chunk)
+    except SessionFailure as e:
+        return _error(502, f"Generation failed: {e}", SessionFailureCode.NODE_ERROR)
+    finally:
+        node.active_sessions = max(0, node.active_sessions - 1)
+        session_mgr.remove(session.id)
+
+    return ChatCompletionResponse(
         id=f"chatcmpl-{session.id}",
-        model=req.model,
+        model=session.model,
         choices=[
             ChatCompletionChoice(
-                message=ChatMessage(
-                    role="assistant",
-                    content=(
-                        f"[POC] Pipeline found: {pipeline_desc}. "
-                        f"Actual inference coming in Phase 2."
-                    ),
-                )
+                message=ChatMessage(role="assistant", content="".join(parts)),
+                finish_reason=session.finish_reason or "stop",
             )
         ],
         usage=Usage(
-            prompt_tokens=sum(len(m.content.split()) for m in req.messages),
+            prompt_tokens=session.prompt_tokens,
+            completion_tokens=session.completion_tokens,
+            total_tokens=session.prompt_tokens + session.completion_tokens,
         ),
     )
 
-    session_mgr.remove(session.id)
-    return response
+
+async def _stream_response(session, node, session_mgr):
+    """Yield OpenAI-style chat.completion.chunk SSE events."""
+    completion_id = f"chatcmpl-{session.id}"
+    created = int(time.time())
+
+    def chunk_payload(delta: dict, finish_reason: str | None = None) -> str:
+        return json.dumps({
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": session.model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        })
+
+    try:
+        yield chunk_payload({"role": "assistant", "content": ""})
+        async for text in session.stream():
+            yield chunk_payload({"content": text})
+        yield chunk_payload({}, finish_reason=session.finish_reason or "stop")
+    except SessionFailure as e:
+        yield json.dumps({"error": {"message": str(e), "code": SessionFailureCode.NODE_ERROR}})
+    finally:
+        node.active_sessions = max(0, node.active_sessions - 1)
+        session_mgr.remove(session.id)
+    yield "[DONE]"
 
 
 @router.get("/v1/models")
-async def list_models():
+async def list_models(request: Request):
+    registry = request.app.state.registry
+    served = registry.served_models()
+    if not served:
+        served = [settings.default_model]
     return {
         "object": "list",
         "data": [
-            {"id": "llama-3-8b", "object": "model", "owned_by": "distributed-llm"},
+            {"id": model, "object": "model", "owned_by": "distributed-llm"}
+            for model in served
         ],
     }

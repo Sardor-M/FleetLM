@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from fastapi import WebSocket
 
 from orchestrator.config import settings
-from orchestrator.protocol.messages import NodeStatus
+from orchestrator.protocol.messages import NodeMode, NodeStatus
 
 logger = logging.getLogger("orchestrator.registry")
 
@@ -22,6 +22,8 @@ class ConnectedNode:
     gpu_name: str = "unknown"
     gpu_vram_mb: int = 0
     runtime: str = "webgpu"
+    mode: str = NodeMode.LAYER_SHARD
+    model_id: str | None = None
     status: NodeStatus = NodeStatus.REGISTERING
     layers: tuple[int, int] | None = None
     last_heartbeat: float = field(default_factory=time.time)
@@ -65,8 +67,32 @@ class NodeRegistry:
             self.nodes[node_id].status = NodeStatus.READY
             logger.info(f"Node {node_id} ready with layers {start}-{end}")
 
+    async def set_model_loaded(self, node_id: str, model_id: str) -> None:
+        if node_id in self.nodes:
+            self.nodes[node_id].model_id = model_id
+            self.nodes[node_id].status = NodeStatus.READY
+            logger.info(f"Node {node_id} ready serving model {model_id}")
+
     def get_ready_nodes(self) -> list[ConnectedNode]:
         return [n for n in self.nodes.values() if n.status == NodeStatus.READY]
+
+    def get_generation_nodes(self, model: str | None = None) -> list[ConnectedNode]:
+        """Ready whole-model nodes, optionally filtered to those serving `model`."""
+        nodes = [
+            n for n in self.get_ready_nodes()
+            if n.mode == NodeMode.WHOLE_MODEL
+        ]
+        if model:
+            exact = [n for n in nodes if n.model_id == model]
+            if exact:
+                return exact
+        return nodes
+
+    def served_models(self) -> list[str]:
+        return sorted({
+            n.model_id for n in self.get_ready_nodes()
+            if n.mode == NodeMode.WHOLE_MODEL and n.model_id
+        })
 
     def get_node(self, node_id: str) -> ConnectedNode | None:
         return self.nodes.get(node_id)
@@ -126,6 +152,8 @@ class NodeRegistry:
                     "gpu": n.gpu_name,
                     "vram_mb": n.gpu_vram_mb,
                     "runtime": n.runtime,
+                    "mode": n.mode,
+                    "model": n.model_id,
                     "status": n.status.value,
                     "layers": n.layers,
                     "cpu": round(n.cpu_usage, 1),

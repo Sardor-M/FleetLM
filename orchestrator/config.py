@@ -10,8 +10,12 @@ class Settings(BaseSettings):
     heartbeat_timeout_sec: int = 15
     activation_timeout_sec: int = 10
 
+    # Generation (whole-model nodes)
+    generation_timeout_sec: int = 300  # overall cap per request
+    chunk_timeout_sec: int = 120  # max silence between chunks (covers slow first token)
+
     # Model config
-    default_model: str = "llama-3-8b"
+    default_model: str = "mlx-community/Llama-3.2-1B-Instruct-4bit"
     total_layers: int = 32
 
     model_config = {"env_prefix": "DLLM_"}

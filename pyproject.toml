@@ -26,6 +26,9 @@ dev = [
 inference = [
     "llama-cpp-python>=0.3",
 ]
+mlx = [
+    "mlx-lm>=0.21; platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 
 [tool.setuptools.packages.find]
 include = ["orchestrator*", "node_agent*"]

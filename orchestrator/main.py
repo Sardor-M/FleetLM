@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -64,13 +65,18 @@ app.add_middleware(
 app.include_router(completions_router)
 app.include_router(nodes_router)
 
-# Serve the browser compute page
-app.mount("/static", StaticFiles(directory="web_compute/static"), name="static")
-templates = Jinja2Templates(directory="web_compute/templates")
+# Serve the browser compute page (paths anchored to the repo, not the cwd)
+_BASE_DIR = Path(__file__).resolve().parent.parent
+app.mount(
+    "/static",
+    StaticFiles(directory=str(_BASE_DIR / "web_compute" / "static")),
+    name="static",
+)
+templates = Jinja2Templates(directory=str(_BASE_DIR / "web_compute" / "templates"))
 
 
 @app.get("/")
-async def dashboard(request: __import__("starlette.requests", fromlist=["Request"]).Request):
+async def dashboard(request: Request):
     """Dashboard showing cluster status."""
     return templates.TemplateResponse(
         request,
@@ -80,13 +86,9 @@ async def dashboard(request: __import__("starlette.requests", fromlist=["Request
 
 
 @app.get("/compute")
-async def compute_page(request: __import__("starlette.requests", fromlist=["Request"]).Request):
+async def compute_page(request: Request):
     """The page contributors open to donate compute via WebGPU."""
-    return templates.TemplateResponse(
-        request,
-        "compute.html",
-        {"ws_url": f"ws://{settings.host}:{settings.port}/nodes/ws"},
-    )
+    return templates.TemplateResponse(request, "compute.html", {})
 
 
 @app.get("/health")

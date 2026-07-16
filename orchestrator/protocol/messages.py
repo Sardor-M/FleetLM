@@ -16,16 +16,34 @@ class NodeStatus(str, Enum):
     OFFLINE = "offline"
 
 
+class NodeMode(str, Enum):
+    # The node holds the entire model and serves complete generations.
+    WHOLE_MODEL = "whole_model"
+    # The node holds a range of transformer layers (pipeline-parallel path).
+    LAYER_SHARD = "layer_shard"
+
+
+class SessionFailureCode(str, Enum):
+    NO_CAPACITY = "no_capacity"
+    NODE_ERROR = "node_error"
+
+
 class MessageType(str, Enum):
     # Node -> Orchestrator
     REGISTER = "register"
     HEARTBEAT = "heartbeat"
     LAYERS_LOADED = "layers_loaded"
+    MODEL_LOADED = "model_loaded"
     ACTIVATION_RESULT = "activation_result"
+    GENERATE_CHUNK = "generate_chunk"
+    GENERATE_COMPLETE = "generate_complete"
+    GENERATE_ERROR = "generate_error"
     ERROR = "error"
 
     # Orchestrator -> Node
     LAYER_ASSIGNMENT = "layer_assignment"
+    SERVE_MODEL = "serve_model"
+    GENERATE_REQUEST = "generate_request"
     PREFILL_REQUEST = "prefill_request"
     DECODE_REQUEST = "decode_request"
     SESSION_END = "session_end"
@@ -39,6 +57,34 @@ class RegisterMessage(BaseModel):
     gpu_name: str = "unknown"
     gpu_vram_mb: int = 0
     runtime: str = "webgpu"  # "webgpu" | "webnn" | "native"
+    mode: str = NodeMode.LAYER_SHARD  # "whole_model" | "layer_shard"
+    model_id: str | None = None  # for whole_model: the model this node serves
+
+
+class ModelLoadedMessage(BaseModel):
+    type: str = MessageType.MODEL_LOADED
+    node_id: str
+    model_id: str
+
+
+class GenerateChunkMessage(BaseModel):
+    type: str = MessageType.GENERATE_CHUNK
+    session_id: str
+    text: str
+
+
+class GenerateCompleteMessage(BaseModel):
+    type: str = MessageType.GENERATE_COMPLETE
+    session_id: str
+    finish_reason: str = "stop"
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+class GenerateErrorMessage(BaseModel):
+    type: str = MessageType.GENERATE_ERROR
+    session_id: str
+    message: str = ""
 
 
 class HeartbeatMessage(BaseModel):
@@ -73,6 +119,19 @@ class LayerAssignment(BaseModel):
     start_layer: int
     end_layer: int
     weight_shard_urls: list[str] = []
+
+
+class ServeModelMessage(BaseModel):
+    type: str = MessageType.SERVE_MODEL
+    model_id: str
+
+
+class GenerateRequestMessage(BaseModel):
+    type: str = MessageType.GENERATE_REQUEST
+    session_id: str
+    messages: list[dict]
+    max_tokens: int = 256
+    temperature: float = 0.7
 
 
 class PrefillRequest(BaseModel):
