@@ -28,14 +28,13 @@ def compute_layer_assignment(
     covered = set()
     for n in registry.get_ready_nodes():
         if n.layers:
-            for l in range(n.layers[0], n.layers[1] + 1):
-                covered.add(l)
+            covered.update(range(n.layers[0], n.layers[1] + 1))
 
     # Find first uncovered layer
     start = 0
-    for l in range(total_layers):
-        if l not in covered:
-            start = l
+    for layer in range(total_layers):
+        if layer not in covered:
+            start = layer
             break
     else:
         # All layers covered, assign the second half as a redundant backup
