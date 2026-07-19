@@ -35,6 +35,7 @@ async def node_websocket(ws: WebSocket):
     """
     registry = ws.app.state.registry
     session_mgr = ws.app.state.session_manager
+    batch_store = ws.app.state.batch_store
     await ws.accept()
     node_id = None
 
@@ -84,7 +85,9 @@ async def node_websocket(ws: WebSocket):
                 break
             if message.get("text") is not None:
                 msg = json.loads(message["text"])
-                await _handle_node_message(node_id, msg, registry, session_mgr)
+                await _handle_node_message(
+                    node_id, msg, registry, session_mgr, batch_store, ws
+                )
             elif message.get("bytes") is not None:
                 logger.debug(
                     f"Ignoring binary frame ({len(message['bytes'])} bytes) "
@@ -97,10 +100,11 @@ async def node_websocket(ws: WebSocket):
         if node_id:
             logger.info(f"Node {node_id[:8]} disconnected")
             session_mgr.fail_sessions_for_node(node_id)
+            await batch_store.release_node(node_id)
             await registry.remove(node_id)
 
 
-async def _handle_node_message(node_id: str, msg: dict, registry, session_mgr):
+async def _handle_node_message(node_id, msg, registry, session_mgr, batch_store, ws):
     """Dispatch incoming node messages."""
     msg_type = msg.get("type")
 
@@ -137,6 +141,29 @@ async def _handle_node_message(node_id: str, msg: dict, registry, session_mgr):
         if session:
             logger.error(f"Node {node_id[:8]} generation error: {msg.get('message')}")
             session.fail(msg.get("message", "node generation error"))
+
+    elif msg_type == MessageType.WORK_REQUEST:
+        # The node pulls: it asks for as much work as it has room for.
+        capacity = max(0, min(int(msg.get("capacity", 1)), 64))
+        units = await batch_store.lease(node_id, capacity) if capacity else []
+        await ws.send_json({
+            "type": MessageType.WORK_ASSIGNMENT,
+            "units": [u.payload() for u in units],
+        })
+
+    elif msg_type == MessageType.WORK_RESULT:
+        await batch_store.complete(
+            msg["unit_id"],
+            node_id,
+            msg.get("text", ""),
+            prompt_tokens=msg.get("prompt_tokens", 0),
+            completion_tokens=msg.get("completion_tokens", 0),
+        )
+
+    elif msg_type == MessageType.WORK_FAILED:
+        await batch_store.fail(
+            msg["unit_id"], node_id, msg.get("message", "node reported failure")
+        )
 
     elif msg_type == MessageType.ACTIVATION_RESULT:
         logger.debug(f"Activation result from {node_id[:8]} (layer-shard path, ignored)")

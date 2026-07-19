@@ -38,12 +38,17 @@ class MessageType(str, Enum):
     GENERATE_CHUNK = "generate_chunk"
     GENERATE_COMPLETE = "generate_complete"
     GENERATE_ERROR = "generate_error"
+    WORK_REQUEST = "work_request"
+    WORK_RESULT = "work_result"
+    WORK_FAILED = "work_failed"
     ERROR = "error"
 
     # Orchestrator -> Node
     LAYER_ASSIGNMENT = "layer_assignment"
     SERVE_MODEL = "serve_model"
     GENERATE_REQUEST = "generate_request"
+    WORK_ASSIGNMENT = "work_assignment"
+    WORK_AVAILABLE = "work_available"
     PREFILL_REQUEST = "prefill_request"
     DECODE_REQUEST = "decode_request"
     SESSION_END = "session_end"
@@ -179,3 +184,17 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: Usage = Usage()
+
+
+# ── Batch API ───────────────────────────────────────────────────────────────
+
+class BatchRequestItem(BaseModel):
+    messages: list[ChatMessage]
+    model: str | None = None
+    max_tokens: int = 256
+    temperature: float = 0.7
+
+
+class BatchCreateRequest(BaseModel):
+    requests: list[BatchRequestItem]
+    model: str | None = None  # default for items that don't name one

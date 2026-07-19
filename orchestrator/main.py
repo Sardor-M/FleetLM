@@ -12,8 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from orchestrator.api.batches import router as batches_router
 from orchestrator.api.completions import router as completions_router
 from orchestrator.api.nodes import router as nodes_router
+from orchestrator.batch.store import BatchStore
 from orchestrator.config import settings
 from orchestrator.node_manager.heartbeat import heartbeat_monitor
 from orchestrator.node_manager.registry import NodeRegistry
@@ -28,21 +30,34 @@ logging.basicConfig(
 logger = logging.getLogger("orchestrator")
 
 
+async def lease_reaper(store: BatchStore) -> None:
+    """Return work units whose lease expired (node hung or vanished) to the queue."""
+    while True:
+        await asyncio.sleep(settings.lease_reaper_interval_sec)
+        try:
+            await store.expire_leases()
+        except Exception as e:
+            logger.error(f"Lease reaper error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     app.state.registry = NodeRegistry()
     app.state.session_manager = SessionManager()
+    app.state.batch_store = BatchStore()
     app.state.router = PipelineRouter(app.state.registry)
 
-    # Start background heartbeat monitor
+    # Background tasks: node health, and reclaiming stale work leases
     heartbeat_task = asyncio.create_task(heartbeat_monitor(app.state.registry))
+    reaper_task = asyncio.create_task(lease_reaper(app.state.batch_store))
     logger.info(f"FleetLM orchestrator started on {settings.host}:{settings.port}")
 
     yield
 
     # Shutdown
     heartbeat_task.cancel()
+    reaper_task.cancel()
     logger.info("FleetLM orchestrator shutting down")
 
 
@@ -63,6 +78,7 @@ app.add_middleware(
 
 # Mount API routers
 app.include_router(completions_router)
+app.include_router(batches_router)
 app.include_router(nodes_router)
 
 # Serve the browser compute page (paths anchored to the repo, not the cwd)
@@ -97,6 +113,7 @@ async def health():
         "status": "ok",
         "nodes": app.state.registry.summary(),
         "active_sessions": app.state.session_manager.active_count,
+        "batches": app.state.batch_store.summary(),
     }
 
 

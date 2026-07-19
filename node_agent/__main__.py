@@ -13,6 +13,7 @@ Environment:
     NODE_ENGINE       auto | mlx | llama_cpp | mock   (default auto)
     NODE_MODEL        model to serve; HF repo id for mlx, GGUF path for
                       llama_cpp (default mlx-community/Llama-3.2-1B-Instruct-4bit)
+    NODE_BATCH_SIZE   work units to lease at a time (default 4)
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("node_agent")
 
 DEFAULT_MODEL = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+IDLE_POLL_SEC = 10  # how often an idle node asks for batch work
 
 
 def detect_gpu() -> tuple[str, int]:
@@ -58,10 +60,17 @@ def detect_gpu() -> tuple[str, int]:
 
 
 class NodeAgent:
-    def __init__(self, orchestrator_url: str, engine: BaseEngine, model_id: str):
+    def __init__(
+        self,
+        orchestrator_url: str,
+        engine: BaseEngine,
+        model_id: str,
+        batch_size: int = 4,
+    ):
         self.orchestrator_url = orchestrator_url
         self.engine = engine
         self.model_id = model_id
+        self.batch_size = batch_size
         self.node_id = uuid.uuid4().hex
         self.model_loaded = False
         self.active_sessions = 0
@@ -69,6 +78,10 @@ class NodeAgent:
         # All outbound traffic funnels through one queue so generation threads,
         # heartbeats, and handlers never write to the socket concurrently.
         self.outbox: asyncio.Queue[dict] = asyncio.Queue()
+        # Batch work units run one at a time, behind the same engine lock as
+        # interactive requests; this queue is the node's local backlog.
+        self.work_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self.work_in_progress = 0
 
     async def run(self):
         logger.info(f"FleetLM node agent starting (id={self.node_id[:8]})")
@@ -90,14 +103,17 @@ class NodeAgent:
 
                 sender = asyncio.create_task(self._sender_loop(ws))
                 heartbeat = asyncio.create_task(self._heartbeat_loop())
+                worker = asyncio.create_task(self._work_loop())
+                poller = asyncio.create_task(self._work_poll_loop())
                 try:
                     await self._message_loop(ws)
                 except EngineError as e:
                     logger.error(f"Fatal: {e} — shutting down")
                     return
                 finally:
-                    sender.cancel()
-                    heartbeat.cancel()
+                    for task in (sender, heartbeat, worker, poller):
+                        task.cancel()
+                    self._drain_work_queue()
 
             except websockets.ConnectionClosed:
                 logger.warning("Connection lost, reconnecting in 5s...")
@@ -116,7 +132,7 @@ class NodeAgent:
                 "cpu_usage": psutil.cpu_percent(),
                 "gpu_usage": 0.0,
                 "ram_usage": psutil.virtual_memory().percent,
-                "active_sessions": self.active_sessions,
+                "active_sessions": self.active_sessions + self.work_in_progress,
             })
             await asyncio.sleep(5)
 
@@ -133,6 +149,16 @@ class NodeAgent:
 
             elif t == "generate_request":
                 asyncio.create_task(self._generate(msg))
+
+            elif t == "work_assignment":
+                units = msg.get("units", [])
+                for unit in units:
+                    self.work_queue.put_nowait(unit)
+                if units:
+                    logger.info(f"Leased {len(units)} work units")
+
+            elif t == "work_available":
+                self._request_work()
 
             elif t == "session_end":
                 pass  # nothing to clean up: generations are stateless per request
@@ -160,6 +186,7 @@ class NodeAgent:
             "type": "model_loaded", "node_id": self.node_id, "model_id": self.model_id,
         })
         logger.info("Model loaded, ready for inference")
+        self._request_work()
 
     async def _generate(self, msg: dict):
         session_id = msg["session_id"]
@@ -204,11 +231,85 @@ class NodeAgent:
             self.active_sessions -= 1
 
 
+    # ── Batch work ──────────────────────────────────────────────────────
+
+    def _request_work(self) -> None:
+        """Ask for as many units as we have room for. Free to call spuriously."""
+        if not self.model_loaded:
+            return
+        room = self.batch_size - self.work_queue.qsize() - self.work_in_progress
+        if room > 0:
+            self.outbox.put_nowait({
+                "type": "work_request",
+                "node_id": self.node_id,
+                "capacity": room,
+            })
+
+    async def _work_poll_loop(self):
+        """Idle nodes ask for work periodically; `work_available` covers the rest."""
+        while True:
+            await asyncio.sleep(IDLE_POLL_SEC)
+            self._request_work()
+
+    async def _work_loop(self):
+        """Run leased units one at a time, reporting each result as it finishes."""
+        while True:
+            unit = await self.work_queue.get()
+            self.work_in_progress += 1
+            unit_id = unit["unit_id"]
+            try:
+                text, prompt_tokens, completion_tokens = await asyncio.to_thread(
+                    self._run_unit, unit
+                )
+                self.outbox.put_nowait({
+                    "type": "work_result",
+                    "node_id": self.node_id,
+                    "unit_id": unit_id,
+                    "text": text,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                })
+                logger.info(f"Unit {unit_id} done ({completion_tokens} tokens)")
+            except Exception as e:
+                logger.error(f"Unit {unit_id} failed: {e}")
+                self.outbox.put_nowait({
+                    "type": "work_failed",
+                    "node_id": self.node_id,
+                    "unit_id": unit_id,
+                    "message": str(e),
+                })
+            finally:
+                self.work_in_progress -= 1
+                self._request_work()
+
+    def _run_unit(self, unit: dict) -> tuple[str, int, int]:
+        parts = list(self.engine.generate_stream(
+            unit.get("messages", []),
+            unit.get("max_tokens", 256),
+            unit.get("temperature", 0.7),
+        ))
+        return (
+            "".join(parts),
+            self.engine.last_prompt_tokens,
+            self.engine.last_completion_tokens,
+        )
+
+    def _drain_work_queue(self) -> None:
+        """Drop local backlog on disconnect: the orchestrator requeues those leases."""
+        dropped = 0
+        while not self.work_queue.empty():
+            self.work_queue.get_nowait()
+            dropped += 1
+        if dropped:
+            logger.warning(f"Dropped {dropped} unstarted work units on disconnect")
+
+
 async def main():
     url = os.environ.get("ORCHESTRATOR_URL", "ws://localhost:8080/nodes/ws")
     engine = create_engine(os.environ.get("NODE_ENGINE", "auto"))
     model_id = os.environ.get("NODE_MODEL", DEFAULT_MODEL)
-    agent = NodeAgent(url, engine, model_id)
+    batch_size = int(os.environ.get("NODE_BATCH_SIZE", "4"))
+    agent = NodeAgent(url, engine, model_id, batch_size)
     await agent.run()
 
 
