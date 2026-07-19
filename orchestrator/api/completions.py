@@ -73,15 +73,20 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
     if req.stream:
         return EventSourceResponse(
-            _stream_response(session, node, session_mgr),
+            _stream_response(session, node, session_mgr, request.app.state.metrics),
             media_type="text/event-stream",
         )
 
+    metrics = request.app.state.metrics
     try:
         parts: list[str] = []
         async for chunk in session.stream():
             parts.append(chunk)
+        metrics.session_completed(
+            node.node_id, session.prompt_tokens, session.completion_tokens
+        )
     except SessionFailure as e:
+        metrics.session_failed(node.node_id)
         return _error(502, f"Generation failed: {e}", SessionFailureCode.NODE_ERROR)
     finally:
         node.active_sessions = max(0, node.active_sessions - 1)
@@ -104,7 +109,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     )
 
 
-async def _stream_response(session, node, session_mgr):
+async def _stream_response(session, node, session_mgr, metrics):
     """Yield OpenAI-style chat.completion.chunk SSE events."""
     completion_id = f"chatcmpl-{session.id}"
     created = int(time.time())
@@ -123,7 +128,11 @@ async def _stream_response(session, node, session_mgr):
         async for text in session.stream():
             yield chunk_payload({"content": text})
         yield chunk_payload({}, finish_reason=session.finish_reason or "stop")
+        metrics.session_completed(
+            node.node_id, session.prompt_tokens, session.completion_tokens
+        )
     except SessionFailure as e:
+        metrics.session_failed(node.node_id)
         yield json.dumps({"error": {"message": str(e), "code": SessionFailureCode.NODE_ERROR}})
     finally:
         node.active_sessions = max(0, node.active_sessions - 1)

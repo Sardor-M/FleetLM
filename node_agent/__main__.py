@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import platform
+import time
 import uuid
 
 import psutil
@@ -66,11 +67,13 @@ class NodeAgent:
         engine: BaseEngine,
         model_id: str,
         batch_size: int = 4,
+        join_token: str = "",
     ):
         self.orchestrator_url = orchestrator_url
         self.engine = engine
         self.model_id = model_id
         self.batch_size = batch_size
+        self.join_token = join_token
         self.node_id = uuid.uuid4().hex
         self.model_loaded = False
         self.active_sessions = 0
@@ -99,6 +102,7 @@ class NodeAgent:
                     "runtime": "native",
                     "mode": "whole_model",
                     "model_id": self.model_id,
+                    "join_token": self.join_token,
                 }))
 
                 sender = asyncio.create_task(self._sender_loop(ws))
@@ -115,7 +119,10 @@ class NodeAgent:
                         task.cancel()
                     self._drain_work_queue()
 
-            except websockets.ConnectionClosed:
+            except websockets.ConnectionClosed as e:
+                if e.rcvd is not None and e.rcvd.code == 4401:
+                    logger.error("Rejected by the fleet: invalid join token")
+                    return
                 logger.warning("Connection lost, reconnecting in 5s...")
                 await asyncio.sleep(5)
 
@@ -258,7 +265,7 @@ class NodeAgent:
             self.work_in_progress += 1
             unit_id = unit["unit_id"]
             try:
-                text, prompt_tokens, completion_tokens = await asyncio.to_thread(
+                text, prompt_tokens, completion_tokens, seconds = await asyncio.to_thread(
                     self._run_unit, unit
                 )
                 self.outbox.put_nowait({
@@ -268,8 +275,13 @@ class NodeAgent:
                     "text": text,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
+                    "generation_sec": round(seconds, 3),
                 })
-                logger.info(f"Unit {unit_id} done ({completion_tokens} tokens)")
+                rate = completion_tokens / seconds if seconds > 0 else 0
+                logger.info(
+                    f"Unit {unit_id} done ({completion_tokens} tokens, "
+                    f"{seconds:.1f}s, {rate:.1f} tok/s)"
+                )
             except Exception as e:
                 logger.error(f"Unit {unit_id} failed: {e}")
                 self.outbox.put_nowait({
@@ -282,7 +294,8 @@ class NodeAgent:
                 self.work_in_progress -= 1
                 self._request_work()
 
-    def _run_unit(self, unit: dict) -> tuple[str, int, int]:
+    def _run_unit(self, unit: dict) -> tuple[str, int, int, float]:
+        started = time.monotonic()
         parts = list(self.engine.generate_stream(
             unit.get("messages", []),
             unit.get("max_tokens", 256),
@@ -292,6 +305,7 @@ class NodeAgent:
             "".join(parts),
             self.engine.last_prompt_tokens,
             self.engine.last_completion_tokens,
+            time.monotonic() - started,
         )
 
     def _drain_work_queue(self) -> None:
@@ -309,7 +323,8 @@ async def main():
     engine = create_engine(os.environ.get("NODE_ENGINE", "auto"))
     model_id = os.environ.get("NODE_MODEL", DEFAULT_MODEL)
     batch_size = int(os.environ.get("NODE_BATCH_SIZE", "4"))
-    agent = NodeAgent(url, engine, model_id, batch_size)
+    token = os.environ.get("FLEETLM_JOIN_TOKEN", "")
+    agent = NodeAgent(url, engine, model_id, batch_size, token)
     await agent.run()
 
 

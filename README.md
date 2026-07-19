@@ -113,10 +113,11 @@ pip install mlx-lm
 # 1. Start the orchestrator
 uvicorn orchestrator.main:app --host 0.0.0.0 --port 8080
 
-# 2. Start a node (separate terminal; first run downloads the model)
-python -m node_agent
+# 2. Join the fleet from any machine (first run downloads the model)
+fleetlm doctor                      # what can this machine contribute?
+fleetlm join http://localhost:8080  # ...then contribute it
 #    ...or the dependency-free demo path:
-NODE_ENGINE=mock python -m node_agent
+fleetlm join http://localhost:8080 --engine mock --model demo
 
 # 3. Ask for tokens — one request, or a whole batch (see §4)
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -124,9 +125,24 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   -d '{"model":"mlx-community/Llama-3.2-1B-Instruct-4bit","messages":[{"role":"user","content":"Hello"}]}'
 
 # Streaming: add "stream": true. Dashboard: http://localhost:8080/
+# Fleet numbers: http://localhost:8080/metrics
 ```
 
-Run the tests with `pytest` (20 tests, no model download required — they use the `mock` engine).
+**Running a fleet across machines.** Set a join token on the orchestrator so only invited machines can contribute, then share the one-line join command:
+
+```bash
+# orchestrator (public host)
+DLLM_JOIN_TOKEN=your-secret uvicorn orchestrator.main:app --host 0.0.0.0 --port 8080
+
+# contributor, anywhere
+pip install fleetlm && fleetlm join https://your-fleet.example.com --token your-secret
+```
+
+Nodes only make outbound connections, so contributors need no port forwarding, no static IP, and no firewall changes.
+
+`/metrics` reports what any claim about the fleet has to rest on: units completed and failed, unit success rate, tokens generated, tokens/sec while generating, join-to-ready time, and leases reclaimed from departed nodes — including the contributions of nodes that have since left.
+
+Run the tests with `pytest` (32 tests, no model download required — they use the `mock` engine).
 
 ## 7 · What works today, honestly
 
@@ -139,6 +155,7 @@ Run the tests with `pytest` (20 tests, no model download required — they use t
 | Node failure → lease reclaim / clean session failure | Working, tested |
 | Browser WebGPU node (`/compute`) | Protocol demo only — registers and heartbeats; no browser inference yet |
 | Layer-shard pipeline mode | Protocol stub, deliberately deferred (see §2) |
+| Fleet metrics (`/metrics`) + join-token auth + `fleetlm` CLI | Working, tested |
 | Multi-machine fleet | Not yet run — everything so far is single-machine, multi-process |
 | Performance / cost numbers | Not published — one smoke test exists; paired benchmarks come before claims |
 
@@ -148,7 +165,7 @@ The goal is a published, reproducible demonstration that a fleet of laptops peop
 
 1. ~~**Batch API + work-unit queue**~~ — done (§4).
 2. **Object-storage data plane** — batch payloads and chunked model artifacts behind a version pointer (Stoa-style [1]); target: cold node productive in ~2 minutes.
-3. **Telemetry + paired benchmark harness** — tokens/hour per node, cost per million tokens, work-unit success rate, with fixed seeds and replicates.
+3. ~~**Fleet telemetry**~~ — done (`/metrics`). Still to come: the paired benchmark harness and cost-per-million-tokens accounting.
 4. **Verification sampling** — redundant execution and trusted spot-checks on untrusted nodes. The open problem Stoa never had to solve, and our most novel contribution.
 5. **The flagship run** — 10–20 Macs across cities, one genuinely useful batch job, published artifact and numbers.
 6. **Browser on-ramp** — WebLLM [4] whole-model nodes in a tab; zero-install contribution stays the differentiator.

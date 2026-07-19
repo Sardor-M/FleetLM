@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     max_unit_attempts: int = 3  # then the unit is dead-lettered
     max_batch_requests: int = 10_000
 
+    # Fleet access. Empty means an open fleet (fine locally, not on a public
+    # host): set DLLM_JOIN_TOKEN so only invited machines can contribute.
+    join_token: str = ""
+
     # Model config
     default_model: str = "mlx-community/Llama-3.2-1B-Instruct-4bit"
     total_layers: int = 32

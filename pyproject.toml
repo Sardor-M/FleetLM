@@ -17,6 +17,9 @@ dependencies = [
     "structlog>=24.0",
 ]
 
+[project.scripts]
+fleetlm = "node_agent.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

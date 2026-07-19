@@ -17,6 +17,7 @@ from orchestrator.api.completions import router as completions_router
 from orchestrator.api.nodes import router as nodes_router
 from orchestrator.batch.store import BatchStore
 from orchestrator.config import settings
+from orchestrator.metrics import FleetMetrics
 from orchestrator.node_manager.heartbeat import heartbeat_monitor
 from orchestrator.node_manager.registry import NodeRegistry
 from orchestrator.scheduler.router import PipelineRouter
@@ -43,10 +44,17 @@ async def lease_reaper(store: BatchStore) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    app.state.metrics = FleetMetrics()
     app.state.registry = NodeRegistry()
     app.state.session_manager = SessionManager()
-    app.state.batch_store = BatchStore()
+    app.state.batch_store = BatchStore(metrics=app.state.metrics)
     app.state.router = PipelineRouter(app.state.registry)
+
+    if not settings.join_token:
+        logger.warning(
+            "No DLLM_JOIN_TOKEN set — any machine that can reach this "
+            "orchestrator may join the fleet. Set one before exposing it publicly."
+        )
 
     # Background tasks: node health, and reclaiming stale work leases
     heartbeat_task = asyncio.create_task(heartbeat_monitor(app.state.registry))
@@ -115,6 +123,12 @@ async def health():
         "active_sessions": app.state.session_manager.active_count,
         "batches": app.state.batch_store.summary(),
     }
+
+
+@app.get("/metrics")
+async def metrics():
+    """Fleet counters: throughput, unit success rate, join times, per-node totals."""
+    return app.state.metrics.snapshot()
 
 
 if __name__ == "__main__":

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 
 from fastapi import APIRouter, WebSocket
 
+from orchestrator.config import settings
 from orchestrator.node_manager.assigner import compute_layer_assignment
 from orchestrator.node_manager.registry import ConnectedNode
 from orchestrator.protocol.messages import MessageType, NodeMode
@@ -36,6 +38,7 @@ async def node_websocket(ws: WebSocket):
     registry = ws.app.state.registry
     session_mgr = ws.app.state.session_manager
     batch_store = ws.app.state.batch_store
+    metrics = ws.app.state.metrics
     await ws.accept()
     node_id = None
 
@@ -49,6 +52,16 @@ async def node_websocket(ws: WebSocket):
             await ws.close()
             return
 
+        # Step 1b: fleet access. Constant-time compare so the token can't be
+        # recovered by timing repeated join attempts.
+        if settings.join_token and not hmac.compare_digest(
+            str(msg.get("join_token", "")), settings.join_token
+        ):
+            logger.warning(f"Rejected join from {msg.get('node_id', '?')[:8]}: bad token")
+            await ws.send_json({"error": "invalid join token"})
+            await ws.close(code=4401)
+            return
+
         node_id = msg["node_id"]
         node = ConnectedNode(
             node_id=node_id,
@@ -60,6 +73,7 @@ async def node_websocket(ws: WebSocket):
             model_id=msg.get("model_id"),
         )
         await registry.add(node)
+        metrics.node_joined(node_id, node.gpu_name)
 
         # Step 2: assignment
         if node.mode == NodeMode.WHOLE_MODEL:
@@ -86,7 +100,7 @@ async def node_websocket(ws: WebSocket):
             if message.get("text") is not None:
                 msg = json.loads(message["text"])
                 await _handle_node_message(
-                    node_id, msg, registry, session_mgr, batch_store, ws
+                    node_id, msg, registry, session_mgr, batch_store, ws, metrics
                 )
             elif message.get("bytes") is not None:
                 logger.debug(
@@ -102,9 +116,12 @@ async def node_websocket(ws: WebSocket):
             session_mgr.fail_sessions_for_node(node_id)
             await batch_store.release_node(node_id)
             await registry.remove(node_id)
+            metrics.node_left(node_id)
 
 
-async def _handle_node_message(node_id, msg, registry, session_mgr, batch_store, ws):
+async def _handle_node_message(
+    node_id, msg, registry, session_mgr, batch_store, ws, metrics
+):
     """Dispatch incoming node messages."""
     msg_type = msg.get("type")
 
@@ -118,6 +135,7 @@ async def _handle_node_message(node_id, msg, registry, session_mgr, batch_store,
 
     elif msg_type == MessageType.MODEL_LOADED:
         await registry.set_model_loaded(node_id, msg["model_id"])
+        metrics.node_ready(node_id)
 
     elif msg_type == MessageType.LAYERS_LOADED:
         await registry.set_layers(node_id, msg["start_layer"], msg["end_layer"])
@@ -158,6 +176,7 @@ async def _handle_node_message(node_id, msg, registry, session_mgr, batch_store,
             msg.get("text", ""),
             prompt_tokens=msg.get("prompt_tokens", 0),
             completion_tokens=msg.get("completion_tokens", 0),
+            generation_sec=msg.get("generation_sec", 0.0),
         )
 
     elif msg_type == MessageType.WORK_FAILED:

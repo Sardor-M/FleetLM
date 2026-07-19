@@ -102,11 +102,12 @@ class BatchStore:
     semantics here stay the same.
     """
 
-    def __init__(self):
+    def __init__(self, metrics=None):
         self.batches: dict[str, Batch] = {}
         self.units: dict[str, WorkUnit] = {}
         self._pending: list[str] = []  # FIFO of unit ids ready to lease
         self._lock = asyncio.Lock()
+        self.metrics = metrics
 
     # ── Submission ──────────────────────────────────────────────────────
 
@@ -127,6 +128,8 @@ class BatchStore:
                 batch.unit_ids.append(unit.id)
                 self._pending.append(unit.id)
             self.batches[batch.id] = batch
+        if self.metrics:
+            self.metrics.batches_created += 1
         logger.info(f"Batch {batch.id} created with {len(batch.unit_ids)} units")
         return batch
 
@@ -160,6 +163,7 @@ class BatchStore:
         text: str,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        generation_sec: float = 0.0,
     ) -> None:
         """Record a result. The first result to arrive wins; later ones are ignored."""
         async with self._lock:
@@ -177,6 +181,10 @@ class BatchStore:
             unit.node_id = node_id
             unit.lease_expires_at = 0.0
             self._maybe_finish_batch(unit.batch_id)
+        if self.metrics:
+            self.metrics.unit_completed(
+                node_id, prompt_tokens, completion_tokens, generation_sec
+            )
 
     async def fail(self, unit_id: str, node_id: str, error: str) -> None:
         """A node reported failure: requeue unless the unit is out of attempts."""
@@ -191,6 +199,8 @@ class BatchStore:
                     f"Unit {unit_id} failed permanently after {unit.attempts} attempts: {error}"
                 )
                 self._maybe_finish_batch(unit.batch_id)
+                if self.metrics:
+                    self.metrics.unit_failed(node_id)
             else:
                 unit.state = UnitState.PENDING
                 unit.node_id = None
@@ -214,6 +224,8 @@ class BatchStore:
                     requeued += 1
         if requeued:
             logger.info(f"Requeued {requeued} units from departed node {node_id[:8]}")
+            if self.metrics:
+                self.metrics.leases_returned(requeued)
         return requeued
 
     async def expire_leases(self) -> int:
@@ -230,6 +242,8 @@ class BatchStore:
                     expired += 1
         if expired:
             logger.warning(f"Expired {expired} stale leases, units requeued")
+            if self.metrics:
+                self.metrics.leases_returned(expired)
         return expired
 
     # ── Status ──────────────────────────────────────────────────────────
@@ -245,6 +259,8 @@ class BatchStore:
                 return
         batch.state = BatchState.COMPLETED
         batch.completed_at = time.time()
+        if self.metrics:
+            self.metrics.batches_completed += 1
         logger.info(f"Batch {batch_id} completed")
 
     async def cancel_batch(self, batch_id: str) -> bool:
