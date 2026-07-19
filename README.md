@@ -9,11 +9,11 @@ In this setup:
 - One command starts the orchestrator; one command turns any Apple-silicon Mac into a serving node (`python -m node_agent`).
 - Nodes hold the whole model (int8/4-bit via MLX or llama.cpp) — no layer sharding, no cross-node activation traffic, no pipeline to break.
 - Every node connection is **outbound** — NAT and firewalls are a non-problem by construction.
-- The API is OpenAI-compatible: `/v1/chat/completions` with both JSON and SSE streaming responses, plus `/v1/models` reflecting what the fleet actually serves.
-- Requests route to the least-loaded ready node serving the requested model.
-- Nodes join, leave, or crash without stalling the fleet; in-flight sessions on a dead node fail fast with a clean error.
+- **Batch inference** (`/v1/batches`) is the fleet's native workload: submit N requests, nodes pull leased work units, results land as JSONL.
+- Losing a node mid-batch costs only the work in flight on it. Verified: SIGKILL one node of two during a 24-unit batch and all 24 still complete, with exactly the 4 in-flight leases retried.
+- Interactive `/v1/chat/completions` also works, with both JSON and SSE streaming, routed to the least-loaded ready node.
 - A dependency-free `mock` engine runs the full wire protocol end-to-end, so the system is testable without downloading a model.
-- 10 integration tests drive the real protocol: register → serve → generate → stream → complete, plus error and node-loss paths.
+- 20 integration tests drive the real protocol: register → serve → generate → stream → complete, plus lease reclamation, duplicate results, retry/dead-letter, and node-loss paths.
 - A live dashboard (`/`) shows the fleet; a browser page (`/compute`) is the future zero-install contributor on-ramp (WebGPU).
 
 The rest of this README explains each decision.
@@ -51,7 +51,44 @@ The wire protocol is small and typed (`orchestrator/protocol/messages.py`):
 
 Timeouts bound every stage (silence between chunks, total generation time), and a node disconnect immediately fails its in-flight sessions with a 502 rather than hanging the client.
 
-## 4 · What runs on a node?
+## 4 · Why batch is the fleet's real workload
+
+Interactive streaming is the demo; **batch is the product**. A fleet of consumer machines on home internet is strong at exactly what batch inference needs — lots of memory, lots of aggregate throughput, and no user waiting on any individual request — and weak at what interactive serving needs (tight, predictable tail latency).
+
+So the fleet's unit of work is one **small, self-contained, idempotent work unit**: a single request that any node can run, whose result is written once.
+
+```
+POST /v1/batches ──▶ Orchestrator ──▶ [ work-unit queue ]
+                                            │  lease (with deadline)
+                     Node ── work_request ──┤
+                     Node ── work_result ───▶ first result wins
+GET /v1/batches/{id}/results ◀── JSONL, submission order
+```
+
+That shape is what makes node churn boring:
+
+| Event | Consequence |
+|---|---|
+| Node disconnects | Its leases return to the queue immediately |
+| Node hangs (no goodbye) | A background reaper reclaims the lease after `lease_duration_sec` |
+| Duplicate result arrives | Ignored — the first result recorded wins |
+| Unit keeps failing | Retried up to `max_unit_attempts`, then dead-lettered with its error |
+
+Verified on a real 2-node MLX fleet: `kill -9` one node during a 24-unit batch and all 24 units still complete, with exactly the 4 in-flight leases retried and no client-visible error ([`benchmarks/2026-07-19-churn-smoke.md`](benchmarks/2026-07-19-churn-smoke.md)).
+
+```bash
+curl -X POST http://localhost:8080/v1/batches -H "Content-Type: application/json" -d '{
+  "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+  "requests": [
+    {"messages":[{"role":"user","content":"What is the capital of Japan?"}],"max_tokens":20},
+    {"messages":[{"role":"user","content":"Name a primary color."}],"max_tokens":20}
+  ]}'
+
+curl http://localhost:8080/v1/batches/{id}           # status + counts + usage
+curl http://localhost:8080/v1/batches/{id}/results   # JSONL, submission order
+```
+
+## 5 · What runs on a node?
 
 The node agent is ~200 lines of asyncio around a pluggable engine (`node_agent/engine/whole_model.py`):
 
@@ -63,7 +100,7 @@ The node agent is ~200 lines of asyncio around a pluggable engine (`node_agent/e
 
 Generation runs in a worker thread so heartbeats and control messages never block behind a long completion; all outbound traffic funnels through one queue so nothing writes to the socket concurrently. Engine selection: `NODE_ENGINE=auto|mlx|llama_cpp|mock`, model: `NODE_MODEL=...`.
 
-## 5 · Quick start
+## 6 · Quick start
 
 ```bash
 # Prerequisites: Python 3.11+
@@ -81,7 +118,7 @@ python -m node_agent
 #    ...or the dependency-free demo path:
 NODE_ENGINE=mock python -m node_agent
 
-# 3. Ask for tokens
+# 3. Ask for tokens — one request, or a whole batch (see §4)
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"mlx-community/Llama-3.2-1B-Instruct-4bit","messages":[{"role":"user","content":"Hello"}]}'
@@ -89,26 +126,33 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 # Streaming: add "stream": true. Dashboard: http://localhost:8080/
 ```
 
-Run the tests with `pytest` (10 tests, no model download required).
+Run the tests with `pytest` (20 tests, no model download required — they use the `mock` engine).
 
-## 6 · What works today, honestly
+## 7 · What works today, honestly
 
 | Piece | Status |
 |---|---|
 | Orchestrator, registry, routing, heartbeat eviction | Working, tested |
 | Whole-model node agent (MLX / llama.cpp / mock) | Working; MLX path verified on Apple silicon |
-| OpenAI-compatible API, JSON + SSE streaming | Working, tested |
-| Node failure → clean in-flight session failure | Working, tested |
+| Interactive API, JSON + SSE streaming | Working, tested |
+| Batch API + leased work-unit queue | Working, tested; verified against SIGKILL churn on a real 2-node fleet |
+| Node failure → lease reclaim / clean session failure | Working, tested |
 | Browser WebGPU node (`/compute`) | Protocol demo only — registers and heartbeats; no browser inference yet |
 | Layer-shard pipeline mode | Protocol stub, deliberately deferred (see §2) |
-| Performance numbers | Not yet published — benchmarks come before claims |
+| Multi-machine fleet | Not yet run — everything so far is single-machine, multi-process |
+| Performance / cost numbers | Not published — one smoke test exists; paired benchmarks come before claims |
 
-## 7 · What's next
+## 8 · What's next
 
-1. **Object-storage data plane** — model artifacts as chunked int8 shards behind a version pointer (Stoa-style [1]); target: cold node productive in ~2 minutes.
-2. **Batch API** (`/v1/batches`-style) — latency-tolerant bulk inference (synthetic data, evals, RL rollouts) is where consumer fleets are provably competitive [1]; this is the first product surface.
-3. **Browser on-ramp** — WebLLM [4] running whole small models in a tab, joining the fleet as a weaker replica; zero-install contribution stays the differentiator.
-4. **Sharding, last** — pipeline parallelism only for models that fit on no single device, gated on cross-stack numerics measurement.
+The goal is a published, reproducible demonstration that a fleet of laptops people already own is a real inference provider. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full plan.
+
+1. ~~**Batch API + work-unit queue**~~ — done (§4).
+2. **Object-storage data plane** — batch payloads and chunked model artifacts behind a version pointer (Stoa-style [1]); target: cold node productive in ~2 minutes.
+3. **Telemetry + paired benchmark harness** — tokens/hour per node, cost per million tokens, work-unit success rate, with fixed seeds and replicates.
+4. **Verification sampling** — redundant execution and trusted spot-checks on untrusted nodes. The open problem Stoa never had to solve, and our most novel contribution.
+5. **The flagship run** — 10–20 Macs across cities, one genuinely useful batch job, published artifact and numbers.
+6. **Browser on-ramp** — WebLLM [4] whole-model nodes in a tab; zero-install contribution stays the differentiator.
+7. **Sharding, last** — pipeline parallelism only for models that fit on no single device.
 
 ---
 
