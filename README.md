@@ -6,14 +6,15 @@ The design follows one rule learned the hard way: **match the workload to what c
 
 In this setup:
 
-- One command starts the orchestrator; one command turns any Apple-silicon Mac into a serving node (`python -m node_agent`).
+- One command starts the orchestrator; one command turns any Apple-silicon Mac into a serving node (`fleetlm join <fleet-url>`).
 - Nodes hold the whole model (int8/4-bit via MLX or llama.cpp) — no layer sharding, no cross-node activation traffic, no pipeline to break.
 - Every node connection is **outbound** — NAT and firewalls are a non-problem by construction.
 - **Batch inference** (`/v1/batches`) is the fleet's native workload: submit N requests, nodes pull leased work units, results land as JSONL.
 - Losing a node mid-batch costs only the work in flight on it. Verified: SIGKILL one node of two during a 24-unit batch and all 24 still complete, with exactly the 4 in-flight leases retried.
 - Interactive `/v1/chat/completions` also works, with both JSON and SSE streaming, routed to the least-loaded ready node.
+- A join token gates fleet membership, and `/metrics` reports what the fleet actually did — units, tokens, tokens/sec, join times, reclaimed leases.
 - A dependency-free `mock` engine runs the full wire protocol end-to-end, so the system is testable without downloading a model.
-- 20 integration tests drive the real protocol: register → serve → generate → stream → complete, plus lease reclamation, duplicate results, retry/dead-letter, and node-loss paths.
+- 32 integration tests drive the real protocol: register → serve → generate → stream → complete, plus lease reclamation, duplicate results, retry/dead-letter, auth, and node-loss paths.
 - A live dashboard (`/`) shows the fleet; a browser page (`/compute`) is the future zero-install contributor on-ramp (WebGPU).
 
 The rest of this README explains each decision.
