@@ -15,7 +15,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from orchestrator.config import settings
-from orchestrator.protocol.messages import BatchCreateRequest, MessageType
+from orchestrator.protocol import BatchCreateRequest, MessageType
 
 logger = logging.getLogger("orchestrator.batches")
 
@@ -62,7 +62,7 @@ async def create_batch(req: BatchCreateRequest, request: Request):
 
     # Nudge idle nodes so they ask for work immediately instead of waiting
     # for their next poll.
-    for node in registry.get_generation_nodes():
+    for node in registry.get_ready_nodes():
         try:
             await node.ws.send_json({"type": MessageType.WORK_AVAILABLE})
         except Exception as e:

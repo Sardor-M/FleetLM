@@ -87,7 +87,7 @@ def test_metrics_endpoint_and_lease_counter(client):
         ws.send_text(json.dumps({
             "type": "register", "node_id": "metricnode", "gpu_name": "test-gpu",
             "gpu_vram_mb": 8000, "runtime": "native",
-            "mode": "whole_model", "model_id": "tiny-test-model",
+            "model_id": "tiny-test-model",
         }))
         assert ws.receive_json()["type"] == "serve_model"
         ws.send_text(json.dumps({
@@ -130,7 +130,7 @@ def test_join_token_rejects_wrong_token(client, monkeypatch):
     monkeypatch.setattr(settings, "join_token", "s3cret")
     with client.websocket_connect("/nodes/ws") as ws:
         ws.send_text(json.dumps({
-            "type": "register", "node_id": "intruder", "mode": "whole_model",
+            "type": "register", "node_id": "intruder",
             "model_id": "m", "join_token": "wrong",
         }))
         assert "invalid" in ws.receive_json()["error"]
@@ -141,7 +141,7 @@ def test_join_token_accepts_correct_token(client, monkeypatch):
     monkeypatch.setattr(settings, "join_token", "s3cret")
     with client.websocket_connect("/nodes/ws") as ws:
         ws.send_text(json.dumps({
-            "type": "register", "node_id": "invited", "mode": "whole_model",
+            "type": "register", "node_id": "invited",
             "model_id": "m", "join_token": "s3cret",
         }))
         assert ws.receive_json()["type"] == "serve_model"

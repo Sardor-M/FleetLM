@@ -1,24 +1,21 @@
 // Cluster dashboard: polls /health and renders fleet state.
 
 const EMPTY_ROW =
-    '<tr><td colspan="8" style="color:#666; text-align:center;">' +
-    'No nodes connected. Run <code>python -m node_agent</code> or open ' +
-    '<a href="/compute">/compute</a> in Chrome.</td></tr>';
+    '<tr><td colspan="7" class="empty">No nodes connected — see ' +
+    '<a href="/compute">how to contribute a machine</a>.</td></tr>';
 
 function nodeRow(n) {
-    const model = n.model
-        ? n.model.split("/").pop()
-        : (n.layers ? `layers ${n.layers[0]}-${n.layers[1]}` : "-");
+    const model = n.model ? n.model.split("/").pop() : "-";
     return `
         <tr>
             <td>${n.id}</td>
             <td>${n.gpu}</td>
             <td>${n.vram_mb} MB</td>
             <td>${n.runtime}</td>
-            <td>${n.mode === "whole_model" ? "whole model" : "layer shard"}</td>
             <td>${model}</td>
             <td><span class="badge badge-${n.status}">${n.status}</span></td>
             <td>${n.cpu}%</td>
+            <td>${n.active}</td>
         </tr>
     `;
 }

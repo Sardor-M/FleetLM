@@ -147,3 +147,22 @@ td { font-family: monospace; }
 .links a:hover { border-color: #7c3aed; }
 
 pre.snippet { color: #888; font-size: 0.85rem; }
+
+/* Contribute page */
+.note {
+    color: #777;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    margin-top: 1rem;
+}
+.verdict {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+.verdict-ok   { background: #22c55e11; color: #86efac; border: 1px solid #22c55e33; }
+.verdict-warn { background: #eab30811; color: #fde68a; border: 1px solid #eab30833; }
+.tok { color: #a78bfa; }
+td.empty, .empty { color: #666; text-align: center; }

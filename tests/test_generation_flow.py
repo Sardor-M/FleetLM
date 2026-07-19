@@ -21,14 +21,13 @@ def client():
         yield c
 
 
-def _register_whole_model_node(ws, client, node_id="fakenode1", model="tiny-test-model"):
+def _register_node(ws, client, node_id="fakenode1", model="tiny-test-model"):
     ws.send_text(json.dumps({
         "type": "register",
         "node_id": node_id,
         "gpu_name": "test-gpu",
         "gpu_vram_mb": 8000,
         "runtime": "native",
-        "mode": "whole_model",
         "model_id": model,
     }))
     assignment = ws.receive_json()
@@ -50,20 +49,19 @@ def _register_whole_model_node(ws, client, node_id="fakenode1", model="tiny-test
 
 def test_node_registration_and_models_list(client):
     with client.websocket_connect("/nodes/ws") as ws:
-        _register_whole_model_node(ws, client)
+        _register_node(ws, client)
 
         models = client.get("/v1/models").json()
         assert models["data"][0]["id"] == "tiny-test-model"
 
         health = client.get("/health").json()
         node = health["nodes"]["nodes"][0]
-        assert node["mode"] == "whole_model"
         assert node["model"] == "tiny-test-model"
 
 
 def test_full_generation_roundtrip(client):
     with client.websocket_connect("/nodes/ws") as ws:
-        _register_whole_model_node(ws, client)
+        _register_node(ws, client)
 
         result = {}
 
@@ -109,7 +107,7 @@ def test_full_generation_roundtrip(client):
 
 def test_generation_error_from_node(client):
     with client.websocket_connect("/nodes/ws") as ws:
-        _register_whole_model_node(ws, client)
+        _register_node(ws, client)
 
         result = {}
 
@@ -138,7 +136,7 @@ def test_generation_error_from_node(client):
 
 def test_node_disconnect_fails_inflight_session(client):
     with client.websocket_connect("/nodes/ws") as ws:
-        _register_whole_model_node(ws, client)
+        _register_node(ws, client)
 
         result = {}
 
@@ -163,7 +161,7 @@ def test_node_disconnect_fails_inflight_session(client):
 
 
 def test_mock_engine_generates():
-    from node_agent.engine.whole_model import MockEngine, create_engine
+    from node_agent.engine import MockEngine, create_engine
 
     engine = MockEngine()
     engine.load("test-model")

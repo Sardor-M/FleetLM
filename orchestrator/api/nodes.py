@@ -1,4 +1,24 @@
-"""WebSocket endpoint for compute nodes (native agents or browser tabs)."""
+"""The one WebSocket a compute node opens, and everything that flows over it.
+
+The node always dials out, so contributors need no open ports, no static IP,
+and no firewall changes. Control, interactive generations, batch work units,
+and heartbeats all share this single connection.
+
+    node  -> register {node_id, model_id, gpu_name, gpu_vram_mb, join_token}
+    orch  -> serve_model {model_id}
+    node  -> model_loaded {model_id}                     ... now ready
+    node  -> heartbeat {...} every 5s
+
+  interactive:
+    orch  -> generate_request {session_id, messages, ...}
+    node  -> generate_chunk {session_id, text} ...
+    node  -> generate_complete {session_id, finish_reason, usage}
+
+  batch (node-paced pull):
+    node  -> work_request {capacity}
+    orch  -> work_assignment {units: [...]}
+    node  -> work_result {unit_id, text, usage} | work_failed {unit_id, message}
+"""
 
 from __future__ import annotations
 
@@ -9,32 +29,17 @@ import logging
 from fastapi import APIRouter, WebSocket
 
 from orchestrator.config import settings
-from orchestrator.node_manager.assigner import compute_layer_assignment
-from orchestrator.node_manager.registry import ConnectedNode
-from orchestrator.protocol.messages import MessageType, NodeMode
+from orchestrator.fleet.registry import ConnectedNode
+from orchestrator.protocol import MessageType
 
 router = APIRouter()
 logger = logging.getLogger("orchestrator.nodes")
 
+MAX_LEASE_PER_REQUEST = 64
+
 
 @router.websocket("/nodes/ws")
 async def node_websocket(ws: WebSocket):
-    """WebSocket connection for compute nodes.
-
-    Protocol (whole_model mode — Phase 1):
-    1. Node connects and sends { type: "register", node_id, mode: "whole_model",
-       model_id, gpu_name, gpu_vram_mb, runtime }
-    2. Orchestrator replies { type: "serve_model", model_id }
-    3. Node loads the model, then sends { type: "model_loaded", model_id }
-    4. Node is ready; heartbeats every 5s
-    5. Orchestrator sends { type: "generate_request", session_id, messages, ... }
-    6. Node streams { type: "generate_chunk", session_id, text } messages,
-       then { type: "generate_complete", session_id, finish_reason, usage... }
-
-    Protocol (layer_shard mode — legacy browser path, pipeline inference not
-    yet implemented): registration is answered with a layer_assignment and the
-    node is tracked, but no inference is routed to it.
-    """
     registry = ws.app.state.registry
     session_mgr = ws.app.state.session_manager
     batch_store = ws.app.state.batch_store
@@ -43,17 +48,15 @@ async def node_websocket(ws: WebSocket):
     node_id = None
 
     try:
-        # Step 1: registration message
-        raw = await ws.receive_text()
-        msg = json.loads(raw)
+        msg = json.loads(await ws.receive_text())
 
         if msg.get("type") != MessageType.REGISTER:
             await ws.send_json({"error": "First message must be type: register"})
             await ws.close()
             return
 
-        # Step 1b: fleet access. Constant-time compare so the token can't be
-        # recovered by timing repeated join attempts.
+        # Constant-time compare, so the token can't be recovered by timing
+        # repeated join attempts.
         if settings.join_token and not hmac.compare_digest(
             str(msg.get("join_token", "")), settings.join_token
         ):
@@ -68,44 +71,30 @@ async def node_websocket(ws: WebSocket):
             ws=ws,
             gpu_name=msg.get("gpu_name", "unknown"),
             gpu_vram_mb=msg.get("gpu_vram_mb", 0),
-            runtime=msg.get("runtime", "webgpu"),
-            mode=msg.get("mode", NodeMode.LAYER_SHARD),
+            runtime=msg.get("runtime", "native"),
             model_id=msg.get("model_id"),
         )
         await registry.add(node)
         metrics.node_joined(node_id, node.gpu_name)
 
-        # Step 2: assignment
-        if node.mode == NodeMode.WHOLE_MODEL:
-            await ws.send_json({
-                "type": MessageType.SERVE_MODEL,
-                "model_id": node.model_id or "default",
-            })
-        else:
-            start, end = compute_layer_assignment(node, registry)
-            await ws.send_json({
-                "type": MessageType.LAYER_ASSIGNMENT,
-                "model_id": "llama-3-8b",
-                "start_layer": start,
-                "end_layer": end,
-                "weight_shard_urls": [],  # Phase 5: real shard URLs
-            })
+        await ws.send_json({
+            "type": MessageType.SERVE_MODEL,
+            "model_id": node.model_id or settings.default_model,
+        })
 
-        # Step 3: main message loop (text frames are JSON; binary frames are
-        # activation tensors on the layer-shard path, ignored in Phase 1)
         while True:
-            message = await ws.receive()
-            if message["type"] == "websocket.disconnect":
+            frame = await ws.receive()
+            if frame["type"] == "websocket.disconnect":
                 break
-            if message.get("text") is not None:
-                msg = json.loads(message["text"])
-                await _handle_node_message(
-                    node_id, msg, registry, session_mgr, batch_store, ws, metrics
+            if frame.get("text") is not None:
+                await _handle(
+                    json.loads(frame["text"]),
+                    node_id, registry, session_mgr, batch_store, metrics, ws,
                 )
-            elif message.get("bytes") is not None:
+            elif frame.get("bytes") is not None:
                 logger.debug(
-                    f"Ignoring binary frame ({len(message['bytes'])} bytes) "
-                    f"from node {node_id[:8]}"
+                    f"Ignoring unexpected binary frame "
+                    f"({len(frame['bytes'])} bytes) from {node_id[:8]}"
                 )
 
     except Exception as e:
@@ -119,10 +108,8 @@ async def node_websocket(ws: WebSocket):
             metrics.node_left(node_id)
 
 
-async def _handle_node_message(
-    node_id, msg, registry, session_mgr, batch_store, ws, metrics
-):
-    """Dispatch incoming node messages."""
+async def _handle(msg, node_id, registry, session_mgr, batch_store, metrics, ws):
+    """Dispatch one message from a node."""
     msg_type = msg.get("type")
 
     if msg_type == MessageType.HEARTBEAT:
@@ -136,9 +123,6 @@ async def _handle_node_message(
     elif msg_type == MessageType.MODEL_LOADED:
         await registry.set_model_loaded(node_id, msg["model_id"])
         metrics.node_ready(node_id)
-
-    elif msg_type == MessageType.LAYERS_LOADED:
-        await registry.set_layers(node_id, msg["start_layer"], msg["end_layer"])
 
     elif msg_type == MessageType.GENERATE_CHUNK:
         session = session_mgr.get(msg.get("session_id"))
@@ -161,8 +145,8 @@ async def _handle_node_message(
             session.fail(msg.get("message", "node generation error"))
 
     elif msg_type == MessageType.WORK_REQUEST:
-        # The node pulls: it asks for as much work as it has room for.
-        capacity = max(0, min(int(msg.get("capacity", 1)), 64))
+        # Nodes pull: each asks for as much as it has room for.
+        capacity = max(0, min(int(msg.get("capacity", 1)), MAX_LEASE_PER_REQUEST))
         units = await batch_store.lease(node_id, capacity) if capacity else []
         await ws.send_json({
             "type": MessageType.WORK_ASSIGNMENT,
@@ -184,8 +168,8 @@ async def _handle_node_message(
             msg["unit_id"], node_id, msg.get("message", "node reported failure")
         )
 
-    elif msg_type == MessageType.ACTIVATION_RESULT:
-        logger.debug(f"Activation result from {node_id[:8]} (layer-shard path, ignored)")
-
     elif msg_type == MessageType.ERROR:
         logger.error(f"Node {node_id[:8]} reported error: {msg.get('message')}")
+
+    else:
+        logger.warning(f"Unknown message type from {node_id[:8]}: {msg_type}")

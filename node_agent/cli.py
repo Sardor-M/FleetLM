@@ -29,7 +29,7 @@ def to_ws_url(url: str) -> str:
 
 def cmd_join(args) -> int:
     from node_agent.__main__ import DEFAULT_MODEL, NodeAgent
-    from node_agent.engine.whole_model import create_engine
+    from node_agent.engine import create_engine
 
     engine = create_engine(args.engine)
     model = args.model or os.environ.get("NODE_MODEL", DEFAULT_MODEL)

@@ -1,8 +1,14 @@
-"""Wire protocol message types shared between orchestrator and compute nodes."""
+"""Wire protocol shared by the orchestrator and its compute nodes.
+
+Every node holds a whole model, so the protocol only has to express three
+things: who is on the fleet, one interactive generation, and one batch work
+unit. There is deliberately no layer-sharding vocabulary here — see README §2.
+"""
 
 from __future__ import annotations
 
 from enum import Enum
+
 from pydantic import BaseModel
 
 
@@ -10,17 +16,8 @@ from pydantic import BaseModel
 
 class NodeStatus(str, Enum):
     REGISTERING = "registering"
-    DOWNLOADING = "downloading"
     READY = "ready"
-    BUSY = "busy"
     OFFLINE = "offline"
-
-
-class NodeMode(str, Enum):
-    # The node holds the entire model and serves complete generations.
-    WHOLE_MODEL = "whole_model"
-    # The node holds a range of transformer layers (pipeline-parallel path).
-    LAYER_SHARD = "layer_shard"
 
 
 class SessionFailureCode(str, Enum):
@@ -32,9 +29,7 @@ class MessageType(str, Enum):
     # Node -> Orchestrator
     REGISTER = "register"
     HEARTBEAT = "heartbeat"
-    LAYERS_LOADED = "layers_loaded"
     MODEL_LOADED = "model_loaded"
-    ACTIVATION_RESULT = "activation_result"
     GENERATE_CHUNK = "generate_chunk"
     GENERATE_COMPLETE = "generate_complete"
     GENERATE_ERROR = "generate_error"
@@ -44,26 +39,32 @@ class MessageType(str, Enum):
     ERROR = "error"
 
     # Orchestrator -> Node
-    LAYER_ASSIGNMENT = "layer_assignment"
     SERVE_MODEL = "serve_model"
     GENERATE_REQUEST = "generate_request"
     WORK_ASSIGNMENT = "work_assignment"
     WORK_AVAILABLE = "work_available"
-    PREFILL_REQUEST = "prefill_request"
-    DECODE_REQUEST = "decode_request"
     SESSION_END = "session_end"
 
 
-# ── Node -> Orchestrator Messages ───────────────────────────────────────────
+# ── Node -> Orchestrator ────────────────────────────────────────────────────
 
 class RegisterMessage(BaseModel):
     type: str = MessageType.REGISTER
     node_id: str
     gpu_name: str = "unknown"
     gpu_vram_mb: int = 0
-    runtime: str = "webgpu"  # "webgpu" | "webnn" | "native"
-    mode: str = NodeMode.LAYER_SHARD  # "whole_model" | "layer_shard"
-    model_id: str | None = None  # for whole_model: the model this node serves
+    runtime: str = "native"  # "native" | "webgpu"
+    model_id: str | None = None
+    join_token: str = ""
+
+
+class HeartbeatMessage(BaseModel):
+    type: str = MessageType.HEARTBEAT
+    node_id: str
+    cpu_usage: float = 0.0
+    gpu_usage: float = 0.0
+    ram_usage: float = 0.0
+    active_sessions: int = 0
 
 
 class ModelLoadedMessage(BaseModel):
@@ -92,39 +93,30 @@ class GenerateErrorMessage(BaseModel):
     message: str = ""
 
 
-class HeartbeatMessage(BaseModel):
-    type: str = MessageType.HEARTBEAT
+class WorkRequestMessage(BaseModel):
+    type: str = MessageType.WORK_REQUEST
     node_id: str
-    cpu_usage: float = 0.0
-    gpu_usage: float = 0.0
-    ram_usage: float = 0.0
-    active_sessions: int = 0
+    capacity: int = 1
 
 
-class LayersLoadedMessage(BaseModel):
-    type: str = MessageType.LAYERS_LOADED
+class WorkResultMessage(BaseModel):
+    type: str = MessageType.WORK_RESULT
     node_id: str
-    start_layer: int
-    end_layer: int
+    unit_id: str
+    text: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    generation_sec: float = 0.0
 
 
-class ActivationResultMessage(BaseModel):
-    type: str = MessageType.ACTIVATION_RESULT
-    session_id: str
-    shape: list[int]  # e.g. [1, 4096]
-    dtype: str = "float16"
-    # actual tensor data sent as binary WebSocket frame after this JSON frame
+class WorkFailedMessage(BaseModel):
+    type: str = MessageType.WORK_FAILED
+    node_id: str
+    unit_id: str
+    message: str = ""
 
 
-# ── Orchestrator -> Node Messages ───────────────────────────────────────────
-
-class LayerAssignment(BaseModel):
-    type: str = MessageType.LAYER_ASSIGNMENT
-    model_id: str
-    start_layer: int
-    end_layer: int
-    weight_shard_urls: list[str] = []
-
+# ── Orchestrator -> Node ────────────────────────────────────────────────────
 
 class ServeModelMessage(BaseModel):
     type: str = MessageType.SERVE_MODEL
@@ -139,19 +131,12 @@ class GenerateRequestMessage(BaseModel):
     temperature: float = 0.7
 
 
-class PrefillRequest(BaseModel):
-    type: str = MessageType.PREFILL_REQUEST
-    session_id: str
-    tokens: list[int]
+class WorkAssignmentMessage(BaseModel):
+    type: str = MessageType.WORK_ASSIGNMENT
+    units: list[dict] = []
 
 
-class DecodeRequest(BaseModel):
-    type: str = MessageType.DECODE_REQUEST
-    session_id: str
-    token: int
-
-
-# ── B2B API Models ──────────────────────────────────────────────────────────
+# ── Public API models ───────────────────────────────────────────────────────
 
 class ChatMessage(BaseModel):
     role: str
@@ -159,7 +144,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "llama-3-8b"
+    model: str | None = None
     messages: list[ChatMessage]
     temperature: float = 0.7
     max_tokens: int = 256
@@ -185,8 +170,6 @@ class ChatCompletionResponse(BaseModel):
     choices: list[ChatCompletionChoice]
     usage: Usage = Usage()
 
-
-# ── Batch API ───────────────────────────────────────────────────────────────
 
 class BatchRequestItem(BaseModel):
     messages: list[ChatMessage]

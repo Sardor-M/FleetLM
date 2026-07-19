@@ -11,7 +11,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from orchestrator.batch.store import BatchStore, UnitState
+from orchestrator.batch import BatchStore, UnitState
 from orchestrator.config import settings
 from orchestrator.main import app
 
@@ -26,7 +26,7 @@ def _register_node(ws, client, node_id="batchnode1", model="tiny-test-model"):
     ws.send_text(json.dumps({
         "type": "register", "node_id": node_id, "gpu_name": "test-gpu",
         "gpu_vram_mb": 8000, "runtime": "native",
-        "mode": "whole_model", "model_id": model,
+        "model_id": model,
     }))
     assert ws.receive_json()["type"] == "serve_model"
     ws.send_text(json.dumps({

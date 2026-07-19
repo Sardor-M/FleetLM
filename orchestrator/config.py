@@ -26,7 +26,6 @@ class Settings(BaseSettings):
 
     # Model config
     default_model: str = "mlx-community/Llama-3.2-1B-Instruct-4bit"
-    total_layers: int = 32
 
     model_config = {"env_prefix": "DLLM_"}
 

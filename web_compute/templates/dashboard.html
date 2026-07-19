@@ -35,16 +35,15 @@
                         <th>GPU</th>
                         <th>Memory</th>
                         <th>Runtime</th>
-                        <th>Mode</th>
                         <th>Model</th>
                         <th>Status</th>
                         <th>CPU</th>
+                        <th>Active</th>
                     </tr>
                 </thead>
                 <tbody id="nodes-table">
-                    <tr><td colspan="8" style="color:#666; text-align:center;">
-                        No nodes connected. Run <code>python -m node_agent</code> or open
-                        <a href="/compute">/compute</a> in Chrome.
+                    <tr><td colspan="7" class="empty">
+                        No nodes connected — see <a href="/compute">how to contribute a machine</a>.
                     </td></tr>
                 </tbody>
             </table>
@@ -52,15 +51,21 @@
 
         <div class="card">
             <h2>Test API</h2>
-            <pre class="snippet">curl -X POST http://localhost:8080/v1/chat/completions \
+            <pre class="snippet"># one request
+curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"default","messages":[{"role":"user","content":"Hello"}]}'</pre>
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+
+# a batch (the fleet's native workload)
+curl -X POST http://localhost:8080/v1/batches \
+  -H "Content-Type: application/json" \
+  -d '{"requests":[{"messages":[{"role":"user","content":"Hello"}]}]}'</pre>
         </div>
 
         <div class="links">
-            <a href="/compute">Open Compute Node</a>
+            <a href="/compute">Contribute a machine</a>
             <a href="/docs">API Docs (Swagger)</a>
-            <a href="/health">Health Check</a>
+            <a href="/metrics">Fleet metrics</a>
         </div>
     </div>
 

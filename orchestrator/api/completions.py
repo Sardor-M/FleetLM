@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from orchestrator.config import settings
-from orchestrator.protocol.messages import (
+from orchestrator.protocol import (
     ChatCompletionChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -20,7 +20,7 @@ from orchestrator.protocol.messages import (
     SessionFailureCode,
     Usage,
 )
-from orchestrator.session.manager import SessionFailure
+from orchestrator.session import SessionFailure
 
 logger = logging.getLogger("orchestrator.completions")
 
@@ -38,9 +38,9 @@ def _error(status: int, message: str, code: str) -> JSONResponse:
 async def chat_completions(req: ChatCompletionRequest, request: Request):
     """Handle inference requests. OpenAI-compatible API."""
     session_mgr = request.app.state.session_manager
-    pipeline_router = request.app.state.router
+    node_router = request.app.state.router
 
-    node = pipeline_router.find_generation_node(req.model)
+    node = node_router.pick_node(req.model)
     if node is None:
         return _error(
             503,

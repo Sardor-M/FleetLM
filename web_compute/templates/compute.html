@@ -3,23 +3,34 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FleetLM — Compute Node</title>
+    <title>FleetLM — Contribute a Machine</title>
     <link rel="stylesheet" href="/static/css/main.css">
 </head>
 <body>
     <div class="container container--narrow">
-        <h1>FleetLM Compute Node</h1>
-        <p class="subtitle">Your browser becomes a GPU compute node via WebGPU</p>
+        <h1>Contribute a Machine</h1>
+        <p class="subtitle">Lend idle capacity to the fleet</p>
 
-        <!-- GPU Info -->
         <div class="card">
-            <h2>GPU Hardware</h2>
+            <h2>Join in one command</h2>
+            <pre class="snippet">pip install fleetlm
+fleetlm doctor          # what can this machine contribute?
+fleetlm join <span class="tok">{{ join_url }}</span></pre>
+            <p class="note">
+                The node only makes outbound connections — no open ports, no static IP,
+                no firewall changes. Stop it any time with Ctrl-C; work in flight is
+                retried elsewhere.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>This browser's GPU</h2>
             <div class="status-row">
-                <span class="label">WebGPU Support</span>
-                <span class="value" id="webgpu-support">Checking...</span>
+                <span class="label">WebGPU</span>
+                <span class="value" id="webgpu-support">Checking…</span>
             </div>
             <div class="status-row">
-                <span class="label">GPU Adapter</span>
+                <span class="label">Adapter</span>
                 <span class="value" id="gpu-name">-</span>
             </div>
             <div class="status-row">
@@ -27,44 +38,20 @@
                 <span class="value" id="gpu-arch">-</span>
             </div>
             <div class="status-row">
-                <span class="label">Max Buffer Size</span>
+                <span class="label">Max buffer</span>
                 <span class="value" id="gpu-buffer">-</span>
             </div>
+            <p class="verdict" id="verdict">Probing…</p>
+            <p class="note">
+                Browser nodes can't serve yet — running a whole model in a tab needs a
+                WebGPU runtime, which is on the roadmap. This probe reports what this
+                machine would be able to do when they ship.
+            </p>
         </div>
 
-        <!-- Connection Status -->
-        <div class="card">
-            <h2>Connection</h2>
-            <div class="status-row">
-                <span class="label">Orchestrator</span>
-                <span class="value" id="ws-status">
-                    <span class="status-dot dot-gray"></span> Disconnected
-                </span>
-            </div>
-            <div class="status-row">
-                <span class="label">Node ID</span>
-                <span class="value" id="node-id">-</span>
-            </div>
-            <div class="status-row">
-                <span class="label">Assigned Layers</span>
-                <span class="value" id="layers">-</span>
-            </div>
-            <div class="status-row">
-                <span class="label">Status</span>
-                <span class="value" id="node-status">Idle</span>
-            </div>
-        </div>
-
-        <!-- Controls -->
-        <div class="btn-row">
-            <button class="btn" id="btn-start" onclick="startNode()">Connect &amp; Start</button>
-            <button class="btn btn-stop" id="btn-stop" onclick="stopNode()" disabled>Stop</button>
-        </div>
-
-        <!-- Log -->
-        <div class="card" style="margin-top: 1rem;">
-            <h2>Log</h2>
-            <div id="log"></div>
+        <div class="links">
+            <a href="/">Fleet dashboard</a>
+            <a href="/docs">API docs</a>
         </div>
     </div>
 

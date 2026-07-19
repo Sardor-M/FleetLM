@@ -1,4 +1,4 @@
-"""Distributed LLM Orchestrator - Main entry point."""
+"""FleetLM orchestrator — the fleet's single coordination point."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ from fastapi.templating import Jinja2Templates
 from orchestrator.api.batches import router as batches_router
 from orchestrator.api.completions import router as completions_router
 from orchestrator.api.nodes import router as nodes_router
-from orchestrator.batch.store import BatchStore
+from orchestrator.batch import BatchStore
 from orchestrator.config import settings
 from orchestrator.metrics import FleetMetrics
-from orchestrator.node_manager.heartbeat import heartbeat_monitor
-from orchestrator.node_manager.registry import NodeRegistry
-from orchestrator.scheduler.router import PipelineRouter
-from orchestrator.session.manager import SessionManager
+from orchestrator.fleet.heartbeat import heartbeat_monitor
+from orchestrator.fleet.registry import NodeRegistry
+from orchestrator.fleet.router import Router
+from orchestrator.session import SessionManager
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     app.state.registry = NodeRegistry()
     app.state.session_manager = SessionManager()
     app.state.batch_store = BatchStore(metrics=app.state.metrics)
-    app.state.router = PipelineRouter(app.state.registry)
+    app.state.router = Router(app.state.registry)
 
     if not settings.join_token:
         logger.warning(
@@ -76,7 +76,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS - allow browser compute nodes from any origin
+# CORS: batch clients and the dashboard may call from anywhere
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -101,7 +101,7 @@ templates = Jinja2Templates(directory=str(_BASE_DIR / "web_compute" / "templates
 
 @app.get("/")
 async def dashboard(request: Request):
-    """Dashboard showing cluster status."""
+    """Live fleet status."""
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -111,8 +111,10 @@ async def dashboard(request: Request):
 
 @app.get("/compute")
 async def compute_page(request: Request):
-    """The page contributors open to donate compute via WebGPU."""
-    return templates.TemplateResponse(request, "compute.html", {})
+    """How to contribute a machine, plus a WebGPU capability probe."""
+    return templates.TemplateResponse(
+        request, "compute.html", {"join_url": str(request.base_url).rstrip("/")}
+    )
 
 
 @app.get("/health")

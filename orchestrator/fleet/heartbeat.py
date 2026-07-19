@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 from orchestrator.config import settings
-from orchestrator.node_manager.registry import NodeRegistry
+from orchestrator.fleet.registry import NodeRegistry
 
 logger = logging.getLogger("orchestrator.heartbeat")
 

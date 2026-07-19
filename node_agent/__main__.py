@@ -29,7 +29,7 @@ import uuid
 import psutil
 import websockets
 
-from node_agent.engine.whole_model import BaseEngine, EngineError, create_engine
+from node_agent.engine import BaseEngine, EngineError, create_engine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,7 +100,6 @@ class NodeAgent:
                     "gpu_name": self.gpu_name,
                     "gpu_vram_mb": self.gpu_vram_mb,
                     "runtime": "native",
-                    "mode": "whole_model",
                     "model_id": self.model_id,
                     "join_token": self.join_token,
                 }))
