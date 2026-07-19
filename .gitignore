@@ -13,3 +13,14 @@ venv/
 .pytest_cache/
 docs/
 benchmarks/
+
+# Agent tooling: shared instructions (AGENTS.md, CLAUDE.md, the skills below)
+# are tracked. The maintainer's local setup is not — .mcp.json and the Lumen
+# hooks point at a personal knowledge base on disk, and contributors need
+# none of it to work on FleetLM.
+.mcp.json
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/run-fleet/
+!.claude/skills/measure/

@@ -32,6 +32,10 @@ uvicorn orchestrator.main:app --port 8080
 fleetlm join http://localhost:8080 --engine mock --model demo
 ```
 
+Conventions — commit format, code style, architecture invariants, and the
+rules for publishing numbers — are in [`AGENTS.md`](AGENTS.md). It is written
+for AI coding agents but is the same contract for people.
+
 ### What we look for
 
 - **Tests that drive the real protocol.** Tests here connect actual
@@ -72,5 +76,14 @@ The two most valuable right now:
 2. **Output verification** — deciding whether a result from an untrusted node
    can be trusted, cheaply. This is the open problem for consumer-hardware
    inference and the most interesting thing in the project.
+
+### Commits
+
+[Conventional Commits](https://www.conventionalcommits.org): `feat:`, `fix:`,
+`refactor:`, `perf:`, `test:`, `docs:`, `chore:`, `build:`, `ci:`. Imperative
+subject, 72 characters or fewer, no trailing period. Add `!` and a
+`BREAKING CHANGE:` footer for wire-protocol changes — a node in the field may
+still be running the old one. Full rules and examples in
+[`AGENTS.md`](AGENTS.md).
 
 By contributing you agree your work is licensed under the repository's MIT license.
