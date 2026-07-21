@@ -164,6 +164,10 @@ async def _run_up(args) -> int:
     finally:
         if node_task is not None:
             node_task.cancel()
+            try:
+                await node_task
+            except asyncio.CancelledError:
+                pass
             # Let it unwind so it can release the lease and we avoid a
             # "Task was destroyed but it is pending" warning at loop close.
             try:
