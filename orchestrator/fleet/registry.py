@@ -74,12 +74,17 @@ class NodeRegistry:
         return self.nodes.get(node_id)
 
     def get_ready_nodes(self, model: str | None = None) -> list[ConnectedNode]:
-        """Ready nodes, narrowed to those serving `model` if any do."""
+        """Ready nodes serving `model`, or every ready node if none is named.
+
+        Strict on purpose. This used to fall back to any ready node when no
+        node served the requested model, which silently answered a request for
+        one model with another model's weights: same response shape, different
+        results, no error anywhere to notice. Callers that genuinely do not
+        care which model runs simply pass none.
+        """
         ready = [n for n in self.nodes.values() if n.status == NodeStatus.READY]
         if model:
-            exact = [n for n in ready if n.model_id == model]
-            if exact:
-                return exact
+            return [n for n in ready if n.model_id == model]
         return ready
 
     def get_stale_nodes(self, timeout: int | None = None) -> list[str]:

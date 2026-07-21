@@ -80,12 +80,14 @@ async def test_an_exact_model_match_narrows_the_candidates():
     assert [n.node_id for n in registry.get_ready_nodes("qwen")] == ["qwen"]
 
 
-async def test_an_unserved_model_falls_back_to_the_whole_fleet():
-    """Serving from a different model beats refusing the request outright."""
+async def test_an_unserved_model_matches_nothing():
+    """This test previously asserted the opposite, and the fallback it described
+    was the bug: a request for one model answered with another model's weights,
+    same response shape, no error. Refusing is the correct outcome."""
     registry = NodeRegistry()
     await registry.add(_node("llama", model="llama"))
 
-    assert len(registry.get_ready_nodes("a-model-nobody-serves")) == 1
+    assert registry.get_ready_nodes("a-model-nobody-serves") == []
 
 
 async def test_a_node_still_loading_is_never_a_candidate():

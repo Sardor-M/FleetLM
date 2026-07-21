@@ -147,7 +147,12 @@ async def _handle(msg, node_id, registry, session_mgr, batch_store, metrics, ws)
     elif msg_type == MessageType.WORK_REQUEST:
         # Nodes pull: each asks for as much as it has room for.
         capacity = max(0, min(int(msg.get("capacity", 1)), MAX_LEASE_PER_REQUEST))
-        units = await batch_store.lease(node_id, capacity) if capacity else []
+        # The node's model decides which units it is eligible for.
+        node = registry.get_node(node_id)
+        node_model = node.model_id if node else None
+        units = (
+            await batch_store.lease(node_id, capacity, node_model) if capacity else []
+        )
         await ws.send_json({
             "type": MessageType.WORK_ASSIGNMENT,
             "units": [u.payload() for u in units],
@@ -161,6 +166,7 @@ async def _handle(msg, node_id, registry, session_mgr, batch_store, metrics, ws)
             prompt_tokens=msg.get("prompt_tokens", 0),
             completion_tokens=msg.get("completion_tokens", 0),
             generation_sec=msg.get("generation_sec", 0.0),
+            served_by=msg.get("model"),
         )
 
     elif msg_type == MessageType.WORK_FAILED:

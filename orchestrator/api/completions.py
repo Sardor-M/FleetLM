@@ -42,12 +42,20 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
     node = node_router.pick_node(req.model)
     if node is None:
-        return _error(
-            503,
-            "No compute node is currently serving a model. "
-            "Start a node with: python -m node_agent",
-            SessionFailureCode.NO_CAPACITY,
-        )
+        # Distinguish an empty fleet from a fleet serving something else -
+        # substituting a different model would be worse than refusing.
+        served = request.app.state.registry.served_models()
+        if req.model and served:
+            message = (
+                f"No node is serving '{req.model}'. "
+                f"Currently served: {', '.join(served)}."
+            )
+        else:
+            message = (
+                "No compute node is currently serving a model. "
+                "Start one with: fleetlm up"
+            )
+        return _error(503, message, SessionFailureCode.NO_CAPACITY)
 
     session = session_mgr.create(
         model=node.model_id or req.model,

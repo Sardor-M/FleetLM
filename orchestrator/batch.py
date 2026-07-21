@@ -52,6 +52,7 @@ class WorkUnit:
     error: str | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    served_by: str | None = None  # model the node actually ran
 
     def payload(self) -> dict:
         """What the node needs to run this unit."""
@@ -80,6 +81,10 @@ class WorkUnit:
                 "completion_tokens": self.completion_tokens,
                 "total_tokens": self.prompt_tokens + self.completion_tokens,
             }
+            # Which model actually ran, so a result is never anonymous about
+            # its own provenance. Falls back to what was asked for when a node
+            # is too old to report it.
+            record["model"] = self.served_by or self.model
         else:
             record["error"] = self.error or "unknown error"
         return record
@@ -120,7 +125,11 @@ class BatchStore:
                     batch_id=batch.id,
                     index=i,
                     messages=req.get("messages", []),
-                    model=req.get("model", model),
+                    # `or`, not a .get default: the API model_dumps a
+                    # BatchRequestItem whose `model` key is present and
+                    # None, so a default would never be reached and every
+                    # unit would lose the batch's model.
+                    model=req.get("model") or model,
                     max_tokens=req.get("max_tokens", 256),
                     temperature=req.get("temperature", 0.7),
                 )
@@ -135,23 +144,43 @@ class BatchStore:
 
     # ── Leasing ─────────────────────────────────────────────────────────
 
-    async def lease(self, node_id: str, count: int) -> list[WorkUnit]:
-        """Hand out up to `count` pending units to a node."""
+    async def lease(
+        self, node_id: str, count: int, node_model: str | None = None
+    ) -> list[WorkUnit]:
+        """Hand out up to `count` pending units this node is able to serve.
+
+        A unit that names a model is only handed to a node serving that model.
+        Without this a fleet running mixed models answers a request for one
+        with another, and a single batch can come back as a silent mixture.
+        A unit that names no model, or a node that reports none, stays
+        eligible for anything.
+
+        Units this node cannot take keep their place in the queue rather than
+        being dropped - another node will pick them up.
+        """
         leased: list[WorkUnit] = []
         now = time.time()
         async with self._lock:
-            while self._pending and len(leased) < count:
-                unit = self.units.get(self._pending.pop(0))
-                if unit is None or unit.state != UnitState.PENDING:
+            still_pending: list[str] = []
+            for uid in self._pending:
+                if len(leased) >= count:
+                    still_pending.append(uid)
                     continue
+                unit = self.units.get(uid)
+                if unit is None or unit.state != UnitState.PENDING:
+                    continue  # stale queue entry
                 batch = self.batches.get(unit.batch_id)
                 if batch is None or batch.state == BatchState.CANCELLED:
+                    continue  # the batch went away
+                if unit.model and node_model and unit.model != node_model:
+                    still_pending.append(uid)  # not for this node
                     continue
                 unit.state = UnitState.LEASED
                 unit.node_id = node_id
                 unit.attempts += 1
                 unit.lease_expires_at = now + settings.lease_duration_sec
                 leased.append(unit)
+            self._pending = still_pending
         if leased:
             logger.info(f"Leased {len(leased)} units to node {node_id[:8]}")
         return leased
@@ -164,6 +193,7 @@ class BatchStore:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         generation_sec: float = 0.0,
+        served_by: str | None = None,
     ) -> None:
         """Record a result. The first result to arrive wins; later ones are ignored."""
         async with self._lock:
@@ -179,6 +209,7 @@ class BatchStore:
             unit.prompt_tokens = prompt_tokens
             unit.completion_tokens = completion_tokens
             unit.node_id = node_id
+            unit.served_by = served_by
             unit.lease_expires_at = 0.0
             self._maybe_finish_batch(unit.batch_id)
         if self.metrics:
