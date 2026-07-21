@@ -3,7 +3,11 @@
 Phase 1 design: each node holds the entire model and serves complete
 generations - no layer sharding, no cross-node activation traffic.
 
-Backends (selected via NODE_ENGINE=auto|mlx|llama_cpp|mock):
+Backends (selected via NODE_ENGINE=auto|ollama|mlx|llama_cpp|mock):
+  - ollama:    the easy path. Talks HTTP to a local Ollama daemon, so models
+               are managed with `ollama pull` instead of a Python install and
+               a HuggingFace download. Runs out of process, so batch work is
+               genuinely concurrent.
   - mlx:       Apple silicon, `pip install mlx-lm`. Models by HF repo id,
                e.g. mlx-community/Llama-3.2-1B-Instruct-4bit
   - llama_cpp: any platform, `pip install llama-cpp-python`. Models by
@@ -15,9 +19,12 @@ Backends (selected via NODE_ENGINE=auto|mlx|llama_cpp|mock):
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -251,6 +258,157 @@ class LlamaCppEngine(BaseEngine):
             self.last_completion_tokens = completion_tokens
 
 
+class OllamaEngine(BaseEngine):
+    """Ollama daemon backend, reached over HTTP.
+
+    Ollama runs as its own process, so the lock that serialises the in-process
+    backends is not needed for batch work: `generate_batch` fires concurrent
+    requests and lets the daemon schedule them. Batch width on the daemon side
+    is set with OLLAMA_NUM_PARALLEL, not from here.
+
+    `generate_stream` still takes the lock, because it reports usage through
+    `last_*_tokens` on the instance and concurrent streams would race on it.
+    Batch results carry their counts per unit, so that path needs no lock.
+    """
+
+    name = "ollama"
+    DEFAULT_HOST = "http://localhost:11434"
+
+    def __init__(self, host: str | None = None):
+        super().__init__()
+        raw = host or os.environ.get("OLLAMA_HOST") or self.DEFAULT_HOST
+        if "//" not in raw:
+            raw = f"http://{raw}"
+        self.host = raw.rstrip("/")
+        self._client = None
+
+    # ── daemon helpers ──────────────────────────────────────────────────
+
+    @property
+    def client(self):
+        """One HTTP client shared across every call, so connections are reused.
+
+        Built lazily and under the lock: `generate_batch` fires `_complete`
+        from many threads at once, and httpx.Client is safe to share but its
+        construction is not.
+        """
+        if self._client is None:
+            with self._lock:
+                if self._client is None:
+                    import httpx
+
+                    self._client = httpx.Client(
+                        timeout=httpx.Timeout(600.0, connect=10.0),
+                        limits=httpx.Limits(
+                            max_connections=100, max_keepalive_connections=20
+                        ),
+                    )
+        return self._client
+
+    def _get(self, path: str, timeout: float = 10.0):
+        try:
+            r = self.client.get(f"{self.host}{path}", timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            raise EngineError(
+                f"Ollama is not reachable at {self.host} ({e}). "
+                f"Start it with: ollama serve"
+            ) from e
+
+    def available_models(self) -> list[str]:
+        return [m.get("name", "") for m in self._get("/api/tags").get("models", [])]
+
+    def _resolve(self, model_id: str, available: list[str]) -> str | None:
+        """Ollama tags models as `name:tag`; accept a bare name for `:latest`."""
+        if model_id in available:
+            return model_id
+        if ":" not in model_id and f"{model_id}:latest" in available:
+            return f"{model_id}:latest"
+        return None
+
+    def load(self, model_id: str) -> None:
+        available = self.available_models()
+        resolved = self._resolve(model_id, available)
+        if resolved is None:
+            have = ", ".join(sorted(available)) or "none"
+            raise EngineError(
+                f"Ollama has no model '{model_id}'. Pull it with: "
+                f"ollama pull {model_id}   (currently pulled: {have})"
+            )
+        self.model_id = resolved
+        logger.info(f"Ollama ready at {self.host}, serving {resolved}")
+
+    def _payload(self, messages: Messages, max_tokens: int, temperature: float,
+                 stream: bool) -> dict:
+        return {
+            "model": self.model_id,
+            "messages": messages,
+            "stream": stream,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+
+    # ── generation ──────────────────────────────────────────────────────
+
+    def generate_stream(
+        self, messages: Messages, max_tokens: int, temperature: float
+    ) -> Iterator[str]:
+        with self._lock:
+            with self.client.stream(
+                "POST", f"{self.host}/api/chat",
+                json=self._payload(messages, max_tokens, temperature, stream=True),
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    if chunk.get("error"):
+                        raise EngineError(f"ollama: {chunk['error']}")
+                    piece = chunk.get("message", {}).get("content", "")
+                    if piece:
+                        yield piece
+                    if chunk.get("done"):
+                        # Counts only appear on the final chunk.
+                        self.last_prompt_tokens = chunk.get("prompt_eval_count", 0)
+                        self.last_completion_tokens = chunk.get("eval_count", 0)
+
+    def _complete(self, item: BatchItem) -> BatchOutput:
+        """One non-streaming completion. No shared state, so it is safe to run
+        concurrently with other calls."""
+        try:
+            r = self.client.post(
+                f"{self.host}/api/chat",
+                json=self._payload(
+                    item.messages, item.max_tokens, item.temperature, stream=False
+                ),
+            )
+            r.raise_for_status()
+            body = r.json()
+            if body.get("error"):
+                return BatchOutput(error=f"ollama: {body['error']}")
+            return BatchOutput(
+                text=body.get("message", {}).get("content", ""),
+                prompt_tokens=body.get("prompt_eval_count", 0),
+                completion_tokens=body.get("eval_count", 0),
+            )
+        except Exception as e:
+            return BatchOutput(error=str(e))
+
+    def generate_batch(self, items: list[BatchItem]) -> list[BatchOutput]:
+        """Run the whole lease concurrently against the daemon.
+
+        Deliberately does not take the engine lock: the work happens in another
+        process, and every result carries its own counts, so there is no shared
+        state to protect.
+        """
+        if len(items) == 1:
+            return [self._complete(items[0])]
+        max_workers = min(32, len(items))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            return list(pool.map(self._complete, items))
+
+
 class MockEngine(BaseEngine):
     """Dependency-free engine that echoes the prompt. For tests and plumbing demos."""
 
@@ -279,10 +437,25 @@ class MockEngine(BaseEngine):
             self.last_completion_tokens = len(words)
 
 
+def ollama_is_running(host: str | None = None) -> bool:
+    """True when an Ollama daemon answers. Used for engine auto-detection."""
+    try:
+        OllamaEngine(host).available_models()
+        return True
+    except Exception:
+        return False
+
+
 def create_engine(kind: str = "auto") -> BaseEngine:
-    """Resolve an engine by name; 'auto' prefers mlx, then llama_cpp, then mock."""
+    """Resolve an engine by name.
+
+    'auto' prefers a running Ollama daemon, because it is the path that needs
+    no Python inference stack, then falls back to mlx, llama_cpp, and mock.
+    """
     kind = (kind or "auto").lower()
 
+    if kind == "ollama":
+        return OllamaEngine()
     if kind == "mlx":
         return MlxEngine()
     if kind == "llama_cpp":
@@ -290,8 +463,13 @@ def create_engine(kind: str = "auto") -> BaseEngine:
     if kind == "mock":
         return MockEngine()
     if kind != "auto":
-        raise EngineError(f"Unknown engine '{kind}' (use auto|mlx|llama_cpp|mock)")
+        raise EngineError(
+            f"Unknown engine '{kind}' (use auto|ollama|mlx|llama_cpp|mock)"
+        )
 
+    if ollama_is_running():
+        logger.info("Found a running Ollama daemon; using it")
+        return OllamaEngine()
     try:
         import mlx_lm  # noqa: F401
         return MlxEngine()
@@ -303,7 +481,7 @@ def create_engine(kind: str = "auto") -> BaseEngine:
     except ImportError:
         pass
     logger.warning(
-        "Neither mlx-lm nor llama-cpp-python installed; using mock engine. "
-        "Install one for real inference: pip install mlx-lm"
+        "No inference engine found; using the mock engine. For real inference, "
+        "install Ollama (ollama.com) and run: ollama pull llama3.2"
     )
     return MockEngine()
