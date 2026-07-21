@@ -56,6 +56,16 @@ fleetlm join https://your-fleet.example.com --token your-secret   # on each cont
 
 The host needs to be reachable from the internet - a laptop behind NAT needs a tunnel (Cloudflare Tunnel, ngrok, Tailscale) or port forwarding. Nodes never need any of that: they only dial out.
 
+**To measure a fleet**, `fleetlm bench` runs a fixed workload and reports what happened:
+
+```bash
+fleetlm bench -n 500 --replicates 3 -o result.json
+```
+
+The workload is generated rather than read from a file, so it is identical on every machine that runs it and two people's results are comparable. It reports the median wall clock and the run-to-run spread, per-node throughput, retries and reclaimed leases, and the queue-versus-service latency split - queue time is what more machines are supposed to shrink. Every run also prints what it does *not* establish, including refusing to call a single-node run a speedup.
+
+If you have two Macs, that is the measurement this project most needs: run `fleetlm up` on one, `fleetlm join http://<first-mac-ip>:8080` on the other, and bench both.
+
 ## Three decisions that define it
 
 **Whole models, not sharded layers.** The first design split a model's layers across nodes. That puts a 50-200 ms internet hop inside *every token*, makes every node a single point of failure, and requires the fleet to maintain complete layer coverage at all times. Replicating the whole model on each node removes all three: an 8B model at 4-bit fits in a 16 GB MacBook, nodes become interchangeable, and failure degrades throughput instead of breaking requests. Sharding returns only for models that fit on no single device.
@@ -85,11 +95,12 @@ A node does not run those units one at a time. It works its whole lease at once,
 | `/v1/batches` - leased work units, JSONL results | Working, tested against SIGKILL churn |
 | Batched decode - a node runs its whole lease in one pass | Working, tested |
 | Fleet metrics, join token, `fleetlm doctor` | Working, tested |
-| Speedup on 1 laptop vs several | Coming soon (expected to measure) |
+| `fleetlm bench` - fixed workload, tail latency, spread | Working, tested |
+| Speedup on 1 laptop vs several | Harness ready; needs a second machine to measure |
 | Cost per token | Coming soon (expected to measure) |
 | Browser nodes (`/compute`) | Coming soon (expected to test) |
 
-106 tests, no model download and no GPU required. `pytest -q`
+147 tests, no model download and no GPU required. `pytest -q`
 
 ## What's next
 

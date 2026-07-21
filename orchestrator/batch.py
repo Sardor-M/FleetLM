@@ -48,6 +48,12 @@ class WorkUnit:
     attempts: int = 0
     node_id: str | None = None
     lease_expires_at: float = 0.0
+    # Split so the two halves of a unit's life can be told apart: how long it
+    # waited for a free node, and how long that node then took. Adding machines
+    # should shrink the first and leave the second alone - if the second moves
+    # instead, the fleet is contending, not scaling.
+    created_at: float = field(default_factory=time.time)
+    leased_at: float = 0.0
     result_text: str | None = None
     error: str | None = None
     prompt_tokens: int = 0
@@ -178,6 +184,7 @@ class BatchStore:
                 unit.state = UnitState.LEASED
                 unit.node_id = node_id
                 unit.attempts += 1
+                unit.leased_at = now
                 unit.lease_expires_at = now + settings.lease_duration_sec
                 leased.append(unit)
             self._pending = still_pending
@@ -211,10 +218,22 @@ class BatchStore:
             unit.node_id = node_id
             unit.served_by = served_by
             unit.lease_expires_at = 0.0
+            # Measured here rather than reported by the node: a node cannot
+            # understate how long the fleet took to answer.
+            now = time.time()
+            queue_sec = max(0.0, unit.leased_at - unit.created_at) if unit.leased_at else 0.0
+            service_sec = max(0.0, now - unit.leased_at) if unit.leased_at else 0.0
+            retries = max(0, unit.attempts - 1)
             self._maybe_finish_batch(unit.batch_id)
         if self.metrics:
             self.metrics.unit_completed(
-                node_id, prompt_tokens, completion_tokens, generation_sec
+                node_id,
+                prompt_tokens,
+                completion_tokens,
+                generation_sec,
+                queue_sec=queue_sec,
+                service_sec=service_sec,
+                retries=retries,
             )
 
     async def fail(self, unit_id: str, node_id: str, error: str) -> None:

@@ -2,6 +2,7 @@
 
     fleetlm up                                   # a whole local fleet, one command
     fleetlm batch prompts.jsonl -o results.jsonl # the fleet's actual verb
+    fleetlm bench -n 500                         # how fast is this fleet, really
     fleetlm join https://fleet.example.com --token abc123
     fleetlm doctor
 """
@@ -318,6 +319,240 @@ def cmd_batch(args) -> int:
     return 0
 
 
+# ── bench ───────────────────────────────────────────────────────────────
+#
+# The claim this project rests on is that N machines finish a batch faster
+# than one. That is a measurement, and it has to be one a stranger can repeat
+# on their own hardware and send back - so the workload is generated here
+# rather than read from a file, and is identical on every machine that runs it.
+
+BENCH_PROMPTS = [
+    "Name three uses for a paperclip.",
+    "What is the capital of Japan?",
+    "Explain gravity in one sentence.",
+    "List two prime numbers over 50.",
+    "Why is the sky blue?",
+    "Give a synonym for 'rapid'.",
+    "What does an orchestrator do?",
+    "Summarise photosynthesis briefly.",
+    "How many continents are there?",
+    "Define latency in computing.",
+    "What is a work queue?",
+    "Name a programming language.",
+]
+
+
+def bench_workload(n: int, max_tokens: int) -> list[dict]:
+    """A fixed workload of `n` requests, identical everywhere it is generated.
+
+    Prompts cycle a fixed pool with the index appended, so every unit is
+    distinct - a fleet that deduplicated or cached identical prompts would
+    otherwise post a speedup it did not earn. Temperature is 0 so two runs are
+    comparable.
+    """
+    return [
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"{BENCH_PROMPTS[i % len(BENCH_PROMPTS)]} (#{i})",
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+        }
+        for i in range(n)
+    ]
+
+
+def bench_record(
+    *, workload: dict, runs: list[float], before: dict, after: dict
+) -> dict:
+    """Shape one bench result, including what it fails to establish.
+
+    Kept pure so the arithmetic is testable without a fleet: the numbers this
+    produces are the ones that would be published, and a speedup ratio computed
+    wrongly is worse than no number at all.
+    """
+    ordered = sorted(runs)
+    median = ordered[len(ordered) // 2] if ordered else 0.0
+    lo, hi = (ordered[0], ordered[-1]) if ordered else (0.0, 0.0)
+    nodes = after.get("nodes", [])
+
+    def delta(key: str) -> int:
+        return max(0, after.get(key, 0) - before.get(key, 0))
+
+    caveats = []
+    if len(nodes) < 2:
+        caveats.append(
+            "Single node: this is a baseline, not a speedup. "
+            "It becomes one only when compared against a run with more machines."
+        )
+    if len(runs) < 3:
+        caveats.append(
+            "Fewer than 3 replicates: the spread is not a reliable noise floor."
+        )
+    spread_pct = round(100 * (hi - lo) / median, 1) if median else 0.0
+    if spread_pct > 10:
+        caveats.append(
+            f"Run-to-run spread is {spread_pct}%, wide enough that a "
+            "difference smaller than that is noise."
+        )
+    caveats.append(
+        "Latency percentiles cover the orchestrator's whole lifetime, not just "
+        "this run - start a fresh fleet before benching for clean figures."
+    )
+
+    return {
+        "workload": workload,
+        "fleet": {
+            "nodes": len(nodes),
+            "per_node": [
+                {
+                    "gpu": n.get("gpu"),
+                    "units_completed": n.get("units_completed"),
+                    "units_per_hour": n.get("units_per_hour"),
+                    "tokens_per_sec": n.get("tokens_per_sec"),
+                    "join_to_ready_sec": n.get("join_to_ready_sec"),
+                }
+                for n in nodes
+            ],
+        },
+        "runs_sec": [round(r, 2) for r in runs],
+        "median_sec": round(median, 2),
+        "fastest_sec": round(lo, 2),
+        "slowest_sec": round(hi, 2),
+        "spread_pct": spread_pct,
+        "units_per_sec": (
+            round(workload["requests"] / median, 2) if median else 0.0
+        ),
+        "unit_latency_sec": after.get("unit_latency_sec", {}),
+        "retries": delta("unit_retries"),
+        "leases_reclaimed": delta("leases_reclaimed"),
+        "units_failed": delta("units_failed"),
+        "does_not_establish": caveats,
+    }
+
+
+def _print_bench(record: dict) -> None:
+    fleet = record["fleet"]
+    w = record["workload"]
+    print()
+    print("  ── result " + "─" * 52)
+    print(f"  workload      {w['requests']} requests, {w['max_tokens']} max tokens, temp 0")
+    print(f"  model         {w['model'] or 'fleet default'}")
+    print(f"  nodes         {fleet['nodes']}")
+    for n in fleet["per_node"]:
+        print(
+            f"    - {n['gpu']}: {n['units_completed']} units, "
+            f"{n['units_per_hour']}/hour, {n['tokens_per_sec']} tok/s"
+        )
+    runs = "  ".join(f"{r}s" for r in record["runs_sec"])
+    print(f"  runs          {runs}")
+    print(
+        f"  median        {record['median_sec']}s "
+        f"({record['units_per_sec']} units/s, spread {record['spread_pct']}%)"
+    )
+    tail = record.get("unit_latency_sec", {})
+    for name in ("queue", "service"):
+        d = tail.get(name) or {}
+        if d.get("count"):
+            print(
+                f"  {name:<13} p50 {d['p50']}s  p90 {d['p90']}s  "
+                f"p99 {d['p99']}s  max {d['max']}s"
+            )
+    print(
+        f"  retries       {record['retries']}   "
+        f"reclaimed {record['leases_reclaimed']}   failed {record['units_failed']}"
+    )
+    print()
+    print("  ── what this does not establish " + "─" * 31)
+    for c in record["does_not_establish"]:
+        print(f"    - {c}")
+    print()
+
+
+def cmd_bench(args) -> int:
+    """Run a fixed workload against a fleet and report what actually happened."""
+    import httpx
+
+    base = args.url.rstrip("/")
+    requests = bench_workload(args.n, args.max_tokens)
+    payload = {"requests": requests}
+    if args.model:
+        payload["model"] = args.model
+
+    print(f"FleetLM bench - {args.n} requests x {args.replicates} replicates -> {base}")
+
+    runs: list[float] = []
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            before = client.get(f"{base}/metrics").json()
+            nodes = before.get("nodes_live", 0)
+            if not nodes:
+                print("  no node is connected - start one with: fleetlm up")
+                return 1
+            print(f"  {nodes} node(s) connected\n")
+
+            for i in range(args.replicates):
+                r = client.post(f"{base}/v1/batches", json=payload)
+                if r.status_code != 201:
+                    print(f"  submit failed ({r.status_code}): {r.text[:200]}")
+                    return 1
+                status = r.json()
+                batch_id = status["id"]
+                total = status["request_counts"]["total"]
+                started = time.monotonic()
+                # The redraw only collapses on a terminal. This output exists
+                # to be pasted into an issue or a reply, so off a TTY it stays
+                # one line per run instead of a wall of half-finished bars.
+                live = sys.stdout.isatty()
+                while status["status"] == "in_progress":
+                    time.sleep(args.poll)
+                    status = client.get(f"{base}/v1/batches/{batch_id}").json()
+                    if live:
+                        sys.stdout.write(
+                            f"\r  run {i + 1}/{args.replicates}"
+                            + _progress(status["request_counts"], total, started)
+                        )
+                        sys.stdout.flush()
+                runs.append(time.monotonic() - started)
+                prefix = "\r" if live else ""
+                print(
+                    f"{prefix}  run {i + 1}/{args.replicates}  {runs[-1]:.1f}s"
+                    + (" " * 60 if live else ""),
+                    flush=True,
+                )
+
+            after = client.get(f"{base}/metrics").json()
+    except KeyboardInterrupt:
+        print("\n  interrupted - no result written")
+        return 130
+    except httpx.HTTPError as e:
+        print(f"  cannot reach the orchestrator at {base}: {e}")
+        return 1
+
+    record = bench_record(
+        workload={
+            "requests": args.n,
+            "max_tokens": args.max_tokens,
+            "temperature": 0.0,
+            "model": args.model,
+            "replicates": args.replicates,
+        },
+        runs=runs,
+        before=before,
+        after=after,
+    )
+    _print_bench(record)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+        print(f"  wrote {args.output} - paste this when reporting a result\n")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     """Report whether this machine can contribute, and with what."""
     import psutil
@@ -419,6 +654,18 @@ def main(argv: list[str] | None = None) -> int:
     batch.add_argument("--temperature", type=float, default=0.7)
     batch.add_argument("--poll", type=float, default=1.0, help="status poll interval (s)")
     batch.set_defaults(func=cmd_batch)
+
+    bench = sub.add_parser(
+        "bench", help="measure how fast this fleet finishes a fixed workload"
+    )
+    bench.add_argument("-n", type=int, default=500, help="requests per run")
+    bench.add_argument("--replicates", type=int, default=3, help="runs to repeat")
+    bench.add_argument("--url", default=os.environ.get("FLEETLM_URL", "http://localhost:8080"))
+    bench.add_argument("--model", default=None)
+    bench.add_argument("--max-tokens", type=int, default=48)
+    bench.add_argument("--poll", type=float, default=1.0)
+    bench.add_argument("-o", "--output", default=None, help="write the record as JSON")
+    bench.set_defaults(func=cmd_bench)
 
     join = sub.add_parser("join", help="run this machine as a fleet node")
     join.add_argument("url", help="orchestrator URL, e.g. https://fleet.example.com")
