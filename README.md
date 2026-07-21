@@ -6,7 +6,7 @@
 
 No datacenter GPU anywhere in the serving path.
 
-![FleetLM architecture](assets/fleetlm-flow.gif)
+![FleetLM architecture](assets/fleetlm-flow.png)
 
 </div>
 
