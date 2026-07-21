@@ -61,6 +61,8 @@ fleetlm join https://your-fleet.example.com --token your-secret
 | Duplicate result arrives | Ignored — the first result recorded wins |
 | Unit keeps failing | Retried to `max_unit_attempts`, then dead-lettered with its error |
 
+A node does not run those units one at a time. It decodes its whole lease in a single batched pass, because decode is memory-bandwidth bound — a step streams the entire weight set out of unified memory whatever the batch width, so that read amortises across sequences. A unit that fails still fails alone, and a batch that cannot run falls back to sequential rather than dropping the leases.
+
 **Nodes pull; the orchestrator never pushes.** Each node asks for as much work as it has room for, so a slow laptop simply asks for less. The Python control plane costs 11 µs per work unit — one orchestrator could feed ~36,000 nodes before its own CPU mattered, because 94% of wall-clock is already inside MLX's C++/Metal kernels.
 
 ## What works today
@@ -71,12 +73,13 @@ fleetlm join https://your-fleet.example.com --token your-secret
 | Node agent — MLX / llama.cpp / mock engines | Working; MLX verified on Apple silicon |
 | `/v1/chat/completions` — JSON + SSE streaming | Working, tested |
 | `/v1/batches` — leased work units, JSONL results | Working, tested against SIGKILL churn |
+| Batched decode — a node runs its whole lease in one pass | Working, tested |
 | Fleet metrics, join token, `fleetlm` CLI | Working, tested |
-| Browser nodes (`/compute`) | Capability probe only — can't serve yet |
-| Multi-machine fleet | **Not yet run** — everything so far is single-host |
-| Cost per token | **Not published** — no measurement yet |
+| Browser nodes (`/compute`) | Coming soon (expected to test) |
+| Multi-machine fleet | Coming soon (expected to test) |
+| Cost per token | Coming soon (expected to test) |
 
-32 tests, no model download required. `pytest -q`
+39 tests, no model download required. `pytest -q`
 
 ## What's next
 
