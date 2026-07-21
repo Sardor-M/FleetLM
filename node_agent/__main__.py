@@ -13,7 +13,7 @@ Environment:
     NODE_ENGINE       auto | mlx | llama_cpp | mock   (default auto)
     NODE_MODEL        model to serve; HF repo id for mlx, GGUF path for
                       llama_cpp (default mlx-community/Llama-3.2-1B-Instruct-4bit)
-    NODE_BATCH_SIZE   work units to lease at a time (default 4)
+    NODE_BATCH_SIZE   work units leased and decoded per batch (default 4)
 """
 
 from __future__ import annotations
@@ -29,7 +29,13 @@ import uuid
 import psutil
 import websockets
 
-from node_agent.engine import BaseEngine, EngineError, create_engine
+from node_agent.engine import (
+    BaseEngine,
+    BatchItem,
+    BatchOutput,
+    EngineError,
+    create_engine,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,53 +264,82 @@ class NodeAgent:
             self._request_work()
 
     async def _work_loop(self):
-        """Run leased units one at a time, reporting each result as it finishes."""
+        """Decode leased units as one batch, reporting each result separately."""
         while True:
-            unit = await self.work_queue.get()
-            self.work_in_progress += 1
-            unit_id = unit["unit_id"]
+            units = [await self.work_queue.get()]
+            # Everything already leased and waiting joins this batch. Decode is
+            # memory-bandwidth bound, so extra batch width is nearly free.
+            while len(units) < self.batch_size and not self.work_queue.empty():
+                units.append(self.work_queue.get_nowait())
+            self.work_in_progress += len(units)
             try:
-                text, prompt_tokens, completion_tokens, seconds = await asyncio.to_thread(
-                    self._run_unit, unit
-                )
-                self.outbox.put_nowait({
-                    "type": "work_result",
-                    "node_id": self.node_id,
-                    "unit_id": unit_id,
-                    "text": text,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "generation_sec": round(seconds, 3),
-                })
-                rate = completion_tokens / seconds if seconds > 0 else 0
-                logger.info(
-                    f"Unit {unit_id} done ({completion_tokens} tokens, "
-                    f"{seconds:.1f}s, {rate:.1f} tok/s)"
-                )
+                outputs, seconds = await asyncio.to_thread(self._run_units, units)
+                self._report_units(units, outputs, seconds)
             except Exception as e:
-                logger.error(f"Unit {unit_id} failed: {e}")
+                logger.error(f"Batch of {len(units)} units failed: {e}")
+                for unit in units:
+                    self.outbox.put_nowait({
+                        "type": "work_failed",
+                        "node_id": self.node_id,
+                        "unit_id": unit["unit_id"],
+                        "message": str(e),
+                    })
+            finally:
+                self.work_in_progress -= len(units)
+                self._request_work()
+
+    def _run_units(self, units: list[dict]) -> tuple[list[BatchOutput], float]:
+        items = [
+            BatchItem(
+                messages=u.get("messages", []),
+                max_tokens=u.get("max_tokens", 256),
+                temperature=u.get("temperature", 0.7),
+            )
+            for u in units
+        ]
+        started = time.monotonic()
+        outputs = self.engine.generate_batch(items)
+        elapsed = time.monotonic() - started
+        if len(outputs) != len(units):
+            raise EngineError(
+                f"engine returned {len(outputs)} outputs for {len(units)} units"
+            )
+        # Units in a batch run concurrently, so each is credited an equal share
+        # of wall clock. Per-node tokens/sec then reports real throughput
+        # instead of dividing by the batch's time once per unit.
+        return outputs, elapsed / len(units)
+
+    def _report_units(
+        self, units: list[dict], outputs: list[BatchOutput], seconds: float
+    ) -> None:
+        completed = 0
+        for unit, out in zip(units, outputs):
+            unit_id = unit["unit_id"]
+            if out.error:
+                logger.error(f"Unit {unit_id} failed: {out.error}")
                 self.outbox.put_nowait({
                     "type": "work_failed",
                     "node_id": self.node_id,
                     "unit_id": unit_id,
-                    "message": str(e),
+                    "message": out.error,
                 })
-            finally:
-                self.work_in_progress -= 1
-                self._request_work()
-
-    def _run_unit(self, unit: dict) -> tuple[str, int, int, float]:
-        started = time.monotonic()
-        parts = list(self.engine.generate_stream(
-            unit.get("messages", []),
-            unit.get("max_tokens", 256),
-            unit.get("temperature", 0.7),
-        ))
-        return (
-            "".join(parts),
-            self.engine.last_prompt_tokens,
-            self.engine.last_completion_tokens,
-            time.monotonic() - started,
+                continue
+            completed += 1
+            self.outbox.put_nowait({
+                "type": "work_result",
+                "node_id": self.node_id,
+                "unit_id": unit_id,
+                "text": out.text,
+                "prompt_tokens": out.prompt_tokens,
+                "completion_tokens": out.completion_tokens,
+                "generation_sec": round(seconds, 3),
+            })
+        tokens = sum(o.completion_tokens for o in outputs if not o.error)
+        wall = seconds * len(units)
+        rate = tokens / wall if wall > 0 else 0
+        logger.info(
+            f"Batch of {len(units)} done ({completed} ok, {tokens} tokens, "
+            f"{wall:.1f}s, {rate:.1f} tok/s)"
         )
 
     def _drain_work_queue(self) -> None:
