@@ -281,7 +281,7 @@ class NodeAgent:
                     self.outbox.put_nowait({
                         "type": "work_failed",
                         "node_id": self.node_id,
-                        "unit_id": unit["unit_id"],
+                        "unit_id": unit.get("unit_id", "unknown"),
                         "message": str(e),
                     })
             finally:
