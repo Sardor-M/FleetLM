@@ -314,7 +314,7 @@ class NodeAgent:
     ) -> None:
         completed = 0
         for unit, out in zip(units, outputs):
-            unit_id = unit["unit_id"]
+            unit_id = unit.get("unit_id", "unknown")
             if out.error:
                 logger.error(f"Unit {unit_id} failed: {out.error}")
                 self.outbox.put_nowait({
