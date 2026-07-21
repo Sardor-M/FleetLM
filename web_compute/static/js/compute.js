@@ -39,7 +39,7 @@ async function probe() {
         }
 
         // adapter.info shipped in Chrome 128; requestAdapterInfo() was removed
-        // in early 2024 — support both, require neither.
+        // in early 2024 - support both, require neither.
         const info = adapter.info
             || (adapter.requestAdapterInfo ? await adapter.requestAdapterInfo() : {});
 

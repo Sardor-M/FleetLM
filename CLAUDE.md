@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-**Project conventions live in [`AGENTS.md`](AGENTS.md) — read that first.** It
+**Project conventions live in [`AGENTS.md`](AGENTS.md) - read that first.** It
 covers architecture invariants, code style, testing, commit format, and the
 things this repo deliberately does not have. Everything below is additional
 Claude-specific setup.
@@ -13,7 +13,7 @@ You have a persistent knowledge brain available via the `lumen` MCP server.
 
 ## MANDATORY: Check brain BEFORE answering
 
-On EVERY question — before using web search, before answering from training data:
+On EVERY question - before using web search, before answering from training data:
 
 1. Call `brain_ops` (or `search`) via the lumen MCP server with the core topic.
 2. If results exist, use them as your PRIMARY source. Cite as `[Source: title]`.

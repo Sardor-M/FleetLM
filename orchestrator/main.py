@@ -1,4 +1,4 @@
-"""FleetLM orchestrator — the fleet's single coordination point."""
+"""FleetLM orchestrator - the fleet's single coordination point."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
 
     if not settings.join_token:
         logger.warning(
-            "No DLLM_JOIN_TOKEN set — any machine that can reach this "
+            "No DLLM_JOIN_TOKEN set - any machine that can reach this "
             "orchestrator may join the fleet. Set one before exposing it publicly."
         )
 

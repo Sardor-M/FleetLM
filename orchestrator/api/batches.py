@@ -1,4 +1,4 @@
-"""Batch inference API — the fleet's native workload.
+"""Batch inference API - the fleet's native workload.
 
 Latency-tolerant bulk generation is what a fleet of consumer machines on home
 internet is actually good at: work units are small, independent, idempotent,

@@ -2,7 +2,7 @@
 
 The fleet's unit of work is one small, self-contained, idempotent work unit:
 a single chat request that any node can run and whose result is written once.
-That shape is what makes node churn boring — a lease that expires simply
+That shape is what makes node churn boring - a lease that expires simply
 returns its unit to the queue, and a duplicate result is ignored rather than
 corrupting anything.
 """

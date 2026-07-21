@@ -1,7 +1,7 @@
 """Who is on the fleet right now.
 
 Soft state only: every node here is one that currently holds an open outbound
-WebSocket. A node that vanishes is simply forgotten — its in-flight work is
+WebSocket. A node that vanishes is simply forgotten - its in-flight work is
 recovered by the batch store's lease accounting, not by anything here.
 """
 

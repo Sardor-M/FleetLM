@@ -1,4 +1,4 @@
-"""Fleet metrics — the numbers any claim about FleetLM has to rest on.
+"""Fleet metrics - the numbers any claim about FleetLM has to rest on.
 
 Deliberately narrow: counters and simple rates, recorded where work actually
 completes. Everything here is derived from events the orchestrator already

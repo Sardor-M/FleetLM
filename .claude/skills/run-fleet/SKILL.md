@@ -1,6 +1,6 @@
 ---
 name: run-fleet
-description: Start a local FleetLM fleet and drive real work through it — orchestrator, one or more nodes, an interactive request, and a batch. Use when asked to run, demo, or verify FleetLM end-to-end, or after changing the orchestrator, node agent, or wire protocol.
+description: Start a local FleetLM fleet and drive real work through it - orchestrator, one or more nodes, an interactive request, and a batch. Use when asked to run, demo, or verify FleetLM end-to-end, or after changing the orchestrator, node agent, or wire protocol.
 ---
 
 # Run a local fleet
@@ -24,7 +24,7 @@ Real inference (Apple silicon, ~1.3 s to load a cached model):
 .venv/bin/fleetlm join http://localhost:8080 > /tmp/fleet-node.log 2>&1 &
 ```
 
-No GPU, no download — exercises the identical protocol path:
+No GPU, no download - exercises the identical protocol path:
 
 ```bash
 .venv/bin/fleetlm join http://localhost:8080 --engine mock --model demo &
@@ -52,7 +52,7 @@ curl -sN -X POST http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Count to 5"}],"stream":true}' | head -5
 
-# batch — the fleet's real workload
+# batch - the fleet's real workload
 ID=$(curl -s -X POST http://127.0.0.1:8080/v1/batches \
   -H "Content-Type: application/json" \
   -d '{"requests":[{"messages":[{"role":"user","content":"Name a color."}],"max_tokens":20}]}' \
@@ -78,7 +78,7 @@ kill -9 $(pgrep -f node_agent | head -1)
 Then confirm the batch still reaches `completed` with `failed: 0`, and that
 `attempts > 1` appears on exactly the units the dead node held.
 
-## 5. Clean up — always
+## 5. Clean up - always
 
 ```bash
 pkill -9 -f node_agent; pkill -f "uvicorn orchestrator"
@@ -93,5 +93,5 @@ pkill -9 -f node_agent; pkill -f "uvicorn orchestrator"
   For churn tests use many units with large `max_tokens`.
 - A raw test WebSocket does not request work on its own; only the real node
   agent does. In tests, send `work_request` explicitly.
-- If nothing is ready after a minute, read the node log — a model load
+- If nothing is ready after a minute, read the node log - a model load
   failure is reported there, not by the orchestrator.

@@ -1,7 +1,7 @@
 """Whole-model inference engines for the native node agent.
 
 Phase 1 design: each node holds the entire model and serves complete
-generations — no layer sharding, no cross-node activation traffic.
+generations - no layer sharding, no cross-node activation traffic.
 
 Backends (selected via NODE_ENGINE=auto|mlx|llama_cpp|mock):
   - mlx:       Apple silicon, `pip install mlx-lm`. Models by HF repo id,

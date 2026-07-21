@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Conventions for AI coding agents working in this repository. Humans should
-read this too — it is the same contract either way.
+read this too - it is the same contract either way.
 
 FleetLM serves LLM inference from a fleet of consumer laptops behind an
 OpenAI-compatible API. An orchestrator hands out work over outbound
@@ -19,7 +19,7 @@ fleetlm join http://localhost:8080 --engine mock --model demo   # a node, no GPU
 ```
 
 The `mock` engine runs the entire wire protocol with zero dependencies. Use it
-for anything that isn't specifically about inference quality — never skip an
+for anything that isn't specifically about inference quality - never skip an
 end-to-end check just because a model isn't available.
 
 ## Architecture invariants
@@ -36,7 +36,7 @@ Do not break these without an explicit decision recorded in the README:
    much as it has room for. Load balancing happens by nodes asking for less.
 4. **Work units are self-contained and idempotent.** Any node can run any
    unit; the first result recorded wins; a duplicate is ignored. This is what
-   makes node death boring — preserve it.
+   makes node death boring - preserve it.
 5. **The orchestrator holds only soft state.** Losing it must not lose
    durable data. Nodes reconnect and re-register.
 
@@ -46,7 +46,7 @@ Do not break these without an explicit decision recorded in the README:
 - Type hints on function signatures; `from __future__ import annotations`.
 - Module docstrings explain *why the module exists*, not what each function
   does. Look at `orchestrator/batch.py` for the intended register.
-- Comments state constraints the code cannot express — a protocol
+- Comments state constraints the code cannot express - a protocol
   requirement, a failure mode, a reason for an unobvious choice. Never
   narrate the next line, and never leave notes addressed to a reviewer.
 - Keep new modules flat. Single-file packages were deliberately flattened;
@@ -59,7 +59,7 @@ Do not break these without an explicit decision recorded in the README:
 - Tests drive the **real protocol**: connect an actual WebSocket, register,
   serve, generate, complete. Prefer that over mocking internals.
 - Every failure path gets a test. Node disconnect, duplicate result, expired
-  lease, exhausted retries, bad token — these are the product, not edge
+  lease, exhausted retries, bad token - these are the product, not edge
   cases.
 - Tests must not download models or need a GPU. CI runs on Linux with no
   accelerator.
@@ -102,7 +102,7 @@ Rules:
   reaper." or "adds lease reaper".
 - `!` after the type for a breaking change, plus a `BREAKING CHANGE:` footer
   naming exactly what callers must change. Wire-protocol changes are
-  breaking — a node in the field may be running the old one.
+  breaking - a node in the field may be running the old one.
 - The body explains **why**. The diff already shows what.
 - One logical change per commit. A refactor and a feature are two commits.
 
@@ -122,11 +122,11 @@ cover, and never `git add -A` without checking what it picked up. `docs/` and
 
 Agents often "helpfully" restore these. Don't:
 
-- **Layer sharding / pipeline parallelism** — removed on purpose (README §
+- **Layer sharding / pipeline parallelism** - removed on purpose (README §
   "Three decisions").
-- **`requirements.txt`** — `pyproject.toml` is the single source of truth.
-- **Browser inference** — `/compute` is an honest capability probe. It must
+- **`requirements.txt`** - `pyproject.toml` is the single source of truth.
+- **Browser inference** - `/compute` is an honest capability probe. It must
   not pretend a browser tab can serve until it actually can.
-- **A placeholder engine returning fake tensors** — a previous one returned
+- **A placeholder engine returning fake tensors** - a previous one returned
   `np.random.randn()` while logging "layers loaded". If something cannot do
   the work, it must fail loudly, not fabricate output.

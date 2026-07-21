@@ -1,4 +1,4 @@
-"""`fleetlm` command line — what a contributor actually types.
+"""`fleetlm` command line - what a contributor actually types.
 
     fleetlm join https://fleet.example.com --token abc123
     fleetlm join http://localhost:8080 --model mlx-community/Llama-3.2-3B-Instruct-4bit
@@ -36,7 +36,7 @@ def cmd_join(args) -> int:
     token = args.token or os.environ.get("FLEETLM_JOIN_TOKEN", "")
     ws_url = to_ws_url(args.url)
 
-    print(f"FleetLM — joining {ws_url}")
+    print(f"FleetLM - joining {ws_url}")
     print(f"  engine: {engine.name}   model: {model}")
     if not token:
         print("  no join token (fine for a local fleet)")
@@ -91,7 +91,7 @@ def cmd_doctor(args) -> int:
     elif usable >= 2:
         print("  Suggested: a 1B 4-bit model")
     else:
-        print("  Tight on memory — this machine may struggle to contribute")
+        print("  Tight on memory - this machine may struggle to contribute")
     print("\n  Ready to join:  fleetlm join <fleet-url> --token <token>")
     return 0
 

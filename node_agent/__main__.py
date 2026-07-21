@@ -117,7 +117,7 @@ class NodeAgent:
                 try:
                     await self._message_loop(ws)
                 except EngineError as e:
-                    logger.error(f"Fatal: {e} — shutting down")
+                    logger.error(f"Fatal: {e} - shutting down")
                     return
                 finally:
                     for task in (sender, heartbeat, worker, poller):

@@ -11,11 +11,11 @@ measurement behind either; both were deleted. Do not recreate that situation.
 
 ## Decide what you are producing
 
-**Smoke test** — one run, no controls. Fine for "does this path work at all"
+**Smoke test** - one run, no controls. Fine for "does this path work at all"
 and for a directional number. Must be labeled as a smoke test and must state
 what it does not show.
 
-**Benchmark** — a number anyone may quote. Requires matched inputs, fixed
+**Benchmark** - a number anyone may quote. Requires matched inputs, fixed
 seeds, at least three replicates, and a reported spread. Only claim
 differences that clear the noise.
 
@@ -32,7 +32,7 @@ Never let the first quietly become the second.
    a live run are telemetry; say so.
 4. **Attribute time honestly.** `generation_sec` is engine time reported by
    the node. Wall clock includes queueing, network, and your own polling
-   interval — if your poll loop sleeps 250 ms, say that, because it is inside
+   interval - if your poll loop sleeps 250 ms, say that, because it is inside
    the number.
 5. **State the hardware, model, quantization, and batch shape.** A tok/s
    figure without them means nothing.
@@ -43,7 +43,7 @@ Never let the first quietly become the second.
 
 Write results to `benchmarks/YYYY-MM-DD-<topic>.md`, including setup,
 procedure, results, and an explicit "what this does not show" section. That
-directory is currently untracked — treat it as the working record and quote
+directory is currently untracked - treat it as the working record and quote
 from it rather than inventing numbers elsewhere.
 
 Only promote a number into the README once it is a real benchmark, and link
@@ -54,7 +54,7 @@ or cite where it came from.
 The number the project's argument ultimately rests on, and the most
 error-prone. To be defensible it needs:
 
-- Measured energy, not TDP guesses — wall meter, or `powermetrics` sampled
+- Measured energy, not TDP guesses - wall meter, or `powermetrics` sampled
   across the run on Apple silicon.
 - The machine's *idle* draw subtracted, since the premise is that the laptop
   was already on.

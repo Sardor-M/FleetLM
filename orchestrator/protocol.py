@@ -2,7 +2,7 @@
 
 Every node holds a whole model, so the protocol only has to express three
 things: who is on the fleet, one interactive generation, and one batch work
-unit. There is deliberately no layer-sharding vocabulary here — see README §2.
+unit. There is deliberately no layer-sharding vocabulary here - see README §2.
 """
 
 from __future__ import annotations

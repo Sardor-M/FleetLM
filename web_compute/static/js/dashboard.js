@@ -1,7 +1,7 @@
 // Cluster dashboard: polls /health and renders fleet state.
 
 const EMPTY_ROW =
-    '<tr><td colspan="7" class="empty">No nodes connected — see ' +
+    '<tr><td colspan="7" class="empty">No nodes connected - see ' +
     '<a href="/compute">how to contribute a machine</a>.</td></tr>';
 
 function nodeRow(n) {
