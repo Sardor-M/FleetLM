@@ -2,43 +2,240 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    types: [opened, synchronize, reopened]
+    paths:
+      - "**/*.py" # only Python changes are worth a review pass
+
+permissions:
+  contents: read
+  pull-requests: write # required to post the review comment
 
 jobs:
-  claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+  review:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
-
+    if: github.event.pull_request.draft == false # skip drafts
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Run Claude Code Review
-        id: claude-review
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+      - name: Build review context
+        id: context
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          git fetch origin "$BASE_REF"
 
+          CHANGED_FILES=$(git diff --name-only "origin/$BASE_REF" "${{ github.sha }}" -- '*.py')
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No Python files changed, skipping review"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Resolve first-level local imports from each changed file to repo-relative
+          # paths. Only files that exist inside the repo are emitted - stdlib and
+          # third-party imports are skipped.
+          RELATED_FILES=$(python3 - "$PWD" <<'PY' $CHANGED_FILES
+          import ast, sys
+          from pathlib import Path
+
+          repo = Path(sys.argv[1]).resolve()
+          changed = {Path(p).resolve() for p in sys.argv[2:] if Path(p).exists()}
+
+          def resolve(module: str, level: int, from_file: Path) -> list[Path]:
+              """Existing repo-local files that `module` could refer to."""
+              if level > 0:  # relative import
+                  base = from_file.resolve().parent
+                  for _ in range(level - 1):
+                      base = base.parent
+                  parts = module.split(".") if module else []
+                  root = base.joinpath(*parts)
+              else:
+                  if not module:
+                      return []
+                  root = repo.joinpath(*module.split("."))
+              candidates = [root.with_suffix(".py"), root / "__init__.py"]
+              return [c for c in candidates if c.is_file() and repo in c.parents]
+
+          found: set[Path] = set()
+          for src in changed:
+              try:
+                  tree = ast.parse(src.read_text(encoding="utf-8", errors="replace"))
+              except Exception:
+                  continue
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          found.update(resolve(alias.name, 0, src))
+                  elif isinstance(node, ast.ImportFrom):
+                      mod = node.module or ""
+                      found.update(resolve(mod, node.level or 0, src))
+                      for alias in node.names:
+                          sub = f"{mod}.{alias.name}" if mod else alias.name
+                          found.update(resolve(sub, node.level or 0, src))
+
+          for p in sorted(found - changed):
+              print(p.relative_to(repo))
+          PY
+          )
+
+          # Budget: ~120KB of review context (~30K input tokens).
+          MAX_BYTES=120000
+          CTX=$(mktemp)
+
+          {
+            echo "=== DIFF ==="
+            git diff "origin/$BASE_REF" "${{ github.sha }}" -- '*.py'
+            echo
+            echo "=== FULL CONTENTS OF CHANGED FILES ==="
+            for f in $CHANGED_FILES; do
+              if [ -f "$f" ]; then
+                echo
+                echo "--- File: $f ---"
+                cat -n "$f"
+              fi
+            done
+            if [ -n "$RELATED_FILES" ]; then
+              echo
+              echo "=== RELATED FILES (imported by changed files, context only - do not review) ==="
+              for f in $RELATED_FILES; do
+                if [ -f "$f" ]; then
+                  echo
+                  echo "--- Imported: $f ---"
+                  cat -n "$f"
+                fi
+              done
+            fi
+          } > "$CTX"
+
+          SIZE=$(wc -c < "$CTX")
+          if [ "$SIZE" -gt "$MAX_BYTES" ]; then
+            head -c "$MAX_BYTES" "$CTX" > "${CTX}.trunc"
+            printf '\n\n[TRUNCATED: original %s bytes, kept first %s]\n' "$SIZE" "$MAX_BYTES" >> "${CTX}.trunc"
+            mv "${CTX}.trunc" "$CTX"
+          fi
+
+          echo "context_file=$CTX" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Review with Claude
+        if: steps.context.outputs.skip != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq bc
+
+          CONTEXT=$(cat "${{ steps.context.outputs.context_file }}")
+
+          # Precision bar lives in the SYSTEM prompt (cacheable, sets behavior).
+          # No apostrophes inside - it is bash single-quoted.
+          SYSTEM='You are a senior engineer reviewing a Python PR diff for CORRECTNESS bugs only.
+
+          This repository serves LLM inference from a fleet of consumer laptops. Architecture invariants that a change must not break, and which are worth flagging if violated:
+          - One node holds one whole model. No layer sharding, no cross-node activations, no pipeline.
+          - Nodes only make outbound connections. Nothing may require a node to accept an inbound connection or hold a stable address.
+          - Nodes pull work; the orchestrator never pushes it.
+          - Work units are self-contained and idempotent. The first result recorded wins; a duplicate is ignored.
+          - The orchestrator holds only soft state. Losing it must not lose durable data.
+
+          Rules:
+          - Report a finding ONLY if you can state the concrete failure: the exact input or condition that triggers it AND the wrong result it produces. If you cannot, do not report it.
+          - Aim for coverage within that bar. Report every finding that clears it, including ones you consider low severity or are somewhat unsure about, and mark your confidence. Do not silently drop a real bug because it seems minor.
+          - Before reporting, verify against the imported (context-only) files: confirm the real signature, return type, and contract of anything the changed code calls. If a finding depends on an assumption you cannot confirm from the provided code, DROP it.
+          - Out of scope (never report): style, naming, formatting, typing nits, "consider", "best practice", "could be improved", and anything inside the context-only imported files.
+          - Do NOT reason in your answer. Do not list things you considered and rejected.
+
+          Output (GitHub-flavored markdown, in exactly this structure):
+
+          # Code Review: <one-line description of the PR>
+
+          ## Summary
+          One short paragraph: what the PR changes and how many real issues you found.
+
+          ## Critical Issues
+          Bugs that cause a crash, data loss, a broken architecture invariant, or a security problem. For each, numbered:
+
+          ### 1. <short issue title>
+          **File:** `path/to/file.py`, line(s) N
+
+          Short explanation: the bug, the exact input or condition that triggers it, and the wrong outcome. Include a minimal code snippet only when it clarifies the problem.
+
+          **Recommendation:** the concrete fix, one or two sentences.
+
+          ## Other Issues
+          Same per-issue structure, for bugs that produce a wrong result in a realistic case.
+
+          ## Minor Issues
+          Same per-issue structure, for minor bugs, edge cases, or robustness gaps that still have a concrete triggering case.
+
+          - Omit any section entirely when it has no findings.
+          - The Summary explanation does not count as reasoning - but still do NOT list things you considered and rejected.
+          - If there is genuinely no bug at any severity, do NOT use a canned reply: still output the # Code Review title and the ## Summary section, written in your own words - what the PR changes, what you verified, and a closing sentence confirming you found no correctness issues. Omit all issue sections.'
+
+          USER="Review the CHANGED files only. The diff, full changed files, and imported context files follow.
+
+          $CONTEXT"
+
+          PAYLOAD=$(jq -n \
+            --arg system "$SYSTEM" \
+            --arg user "$USER" \
+            '{
+              "model": "claude-opus-4-8",
+              "max_tokens": 20000,
+              "thinking": {"type": "adaptive"},
+              "output_config": {"effort": "high"},
+              "system": [
+                {"type": "text", "text": $system, "cache_control": {"type": "ephemeral"}}
+              ],
+              "messages": [
+                {"role": "user", "content": $user}
+              ]
+            }')
+
+          RESPONSE=$(curl -s --max-time 900 -w "\n%{http_code}" -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$PAYLOAD")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          USAGE_LINE=""
+          if [ "$HTTP_CODE" != "200" ]; then
+            ERROR_MSG=$(echo "$BODY" | jq -r '.error.message // "Unknown API error"')
+            echo "::error::Claude API returned HTTP $HTTP_CODE: $ERROR_MSG"
+            REVIEW="⚠️ Claude API error (HTTP $HTTP_CODE): $ERROR_MSG"
+          else
+            # With adaptive thinking on, the answer is the TEXT block - content[0]
+            # may be a thinking block.
+            REVIEW=$(echo "$BODY" | jq -r '[.content[] | select(.type == "text") | .text] | join("\n")')
+            if [ -z "$REVIEW" ]; then
+              echo "::error::Unexpected response structure: $BODY"
+              REVIEW="⚠️ Could not parse Claude response. Check workflow logs."
+            fi
+
+            INPUT_TOKENS=$(echo "$BODY"  | jq -r '.usage.input_tokens // 0')
+            OUTPUT_TOKENS=$(echo "$BODY" | jq -r '.usage.output_tokens // 0')
+            CACHE_READ=$(echo "$BODY"    | jq -r '.usage.cache_read_input_tokens // 0')
+            CACHE_CREATE=$(echo "$BODY"  | jq -r '.usage.cache_creation_input_tokens // 0')
+
+            # Opus 4.8 pricing: $5 / 1M input, $25 / 1M output.
+            # Cache read = 10% of input ($0.50/M), cache write = 125% ($6.25/M).
+            INPUT_COST=$(echo   "scale=6; $INPUT_TOKENS  * 5.00 / 1000000" | bc)
+            OUTPUT_COST=$(echo  "scale=6; $OUTPUT_TOKENS * 25.0 / 1000000" | bc)
+            CACHE_R_COST=$(echo "scale=6; $CACHE_READ    * 0.50 / 1000000" | bc)
+            CACHE_W_COST=$(echo "scale=6; $CACHE_CREATE  * 6.25 / 1000000" | bc)
+            TOTAL_COST=$(echo   "scale=6; $INPUT_COST + $OUTPUT_COST + $CACHE_R_COST + $CACHE_W_COST" | bc)
+
+            echo "::notice::Tokens - input=$INPUT_TOKENS output=$OUTPUT_TOKENS cache_read=$CACHE_READ cache_create=$CACHE_CREATE"
+            echo "::notice::Estimated cost: \$${TOTAL_COST} (Opus 4.8 @ \$5/M in, \$25/M out)"
+
+            USAGE_LINE=$(printf '\n\n---\n_Tokens: %s in / %s out · Estimated cost: \$%s (Opus 4.8)_' \
+              "$INPUT_TOKENS" "$OUTPUT_TOKENS" "$TOTAL_COST")
+          fi
+
+          # Always post the result to the PR - including a clean no-issues review.
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$(printf '**Claude AI Code Review:**\n\n%s%s' "$REVIEW" "$USAGE_LINE")"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
