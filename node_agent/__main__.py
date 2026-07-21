@@ -354,7 +354,7 @@ class NodeAgent:
                 "generation_sec": round(seconds, 3),
                 # What actually ran, which can differ from what was asked for
                 # (Ollama resolves a bare name to a :latest tag, for one).
-                "model": self.engine.model_id or self.model_id,
+                "model": getattr(self.engine, "model_id", None) or self.model_id,
             })
         tokens = sum(o.completion_tokens for o in outputs if not o.error)
         wall = seconds * len(units)
