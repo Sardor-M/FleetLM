@@ -365,6 +365,7 @@ class NodeAgent:
         """Drop local backlog on disconnect: the orchestrator requeues those leases."""
         # The assignment for any outstanding request died with the socket.
         self.work_request_inflight = False
+        self.outbox = asyncio.Queue()
         dropped = 0
         while not self.work_queue.empty():
             self.work_queue.get_nowait()
