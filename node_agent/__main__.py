@@ -87,10 +87,11 @@ class NodeAgent:
         # All outbound traffic funnels through one queue so generation threads,
         # heartbeats, and handlers never write to the socket concurrently.
         self.outbox: asyncio.Queue[dict] = asyncio.Queue()
-        # Batch work units run one at a time, behind the same engine lock as
-        # interactive requests; this queue is the node's local backlog.
+        # Leased units waiting to be decoded. Kept topped up while a batch is
+        # running so the next one can start without a round-trip first.
         self.work_queue: asyncio.Queue[dict] = asyncio.Queue()
         self.work_in_progress = 0
+        self.work_request_inflight = False
 
     async def run(self):
         logger.info(f"FleetLM node agent starting (id={self.node_id[:8]})")
@@ -163,6 +164,9 @@ class NodeAgent:
                 asyncio.create_task(self._generate(msg))
 
             elif t == "work_assignment":
+                # Every work_request gets exactly one assignment back, even an
+                # empty one, so this is where the outstanding request clears.
+                self.work_request_inflight = False
                 units = msg.get("units", [])
                 for unit in units:
                     self.work_queue.put_nowait(unit)
@@ -245,16 +249,26 @@ class NodeAgent:
     # ── Batch work ──────────────────────────────────────────────────────
 
     def _request_work(self) -> None:
-        """Ask for as many units as we have room for. Free to call spuriously."""
-        if not self.model_loaded:
+        """Ask for as much work as the local backlog has room for.
+
+        Free to call spuriously. Only one request is ever outstanding, so a
+        node cannot stack requests and end up holding more leases than it can
+        work through before they expire.
+        """
+        if not self.model_loaded or self.work_request_inflight:
             return
-        room = self.batch_size - self.work_queue.qsize() - self.work_in_progress
-        if room > 0:
-            self.outbox.put_nowait({
-                "type": "work_request",
-                "node_id": self.node_id,
-                "capacity": room,
-            })
+        # Room is measured against the queued backlog alone, deliberately not
+        # against what is decoding. Asking early is the whole point: the reply
+        # should arrive while this batch is still running.
+        room = self.batch_size - self.work_queue.qsize()
+        if room <= 0:
+            return
+        self.work_request_inflight = True
+        self.outbox.put_nowait({
+            "type": "work_request",
+            "node_id": self.node_id,
+            "capacity": room,
+        })
 
     async def _work_poll_loop(self):
         """Idle nodes ask for work periodically; `work_available` covers the rest."""
@@ -271,6 +285,11 @@ class NodeAgent:
             while len(units) < self.batch_size and not self.work_queue.empty():
                 units.append(self.work_queue.get_nowait())
             self.work_in_progress += len(units)
+            # Ask for the next lease before decoding, not after. Otherwise the
+            # node sits idle for a full orchestrator round-trip between every
+            # batch, with the GPU doing nothing while it waits to be told what
+            # to run next.
+            self._request_work()
             try:
                 outputs, seconds = await asyncio.to_thread(self._run_units, units)
             except Exception as e:
@@ -344,6 +363,8 @@ class NodeAgent:
 
     def _drain_work_queue(self) -> None:
         """Drop local backlog on disconnect: the orchestrator requeues those leases."""
+        # The assignment for any outstanding request died with the socket.
+        self.work_request_inflight = False
         dropped = 0
         while not self.work_queue.empty():
             self.work_queue.get_nowait()
