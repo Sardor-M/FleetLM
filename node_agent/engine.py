@@ -280,14 +280,34 @@ class OllamaEngine(BaseEngine):
         if "//" not in raw:
             raw = f"http://{raw}"
         self.host = raw.rstrip("/")
+        self._client = None
 
     # ── daemon helpers ──────────────────────────────────────────────────
 
-    def _get(self, path: str, timeout: float = 10.0):
-        import httpx
+    @property
+    def client(self):
+        """One HTTP client shared across every call, so connections are reused.
 
+        Built lazily and under the lock: `generate_batch` fires `_complete`
+        from many threads at once, and httpx.Client is safe to share but its
+        construction is not.
+        """
+        if self._client is None:
+            with self._lock:
+                if self._client is None:
+                    import httpx
+
+                    self._client = httpx.Client(
+                        timeout=httpx.Timeout(600.0, connect=10.0),
+                        limits=httpx.Limits(
+                            max_connections=100, max_keepalive_connections=20
+                        ),
+                    )
+        return self._client
+
+    def _get(self, path: str, timeout: float = 10.0):
         try:
-            r = httpx.get(f"{self.host}{path}", timeout=timeout)
+            r = self.client.get(f"{self.host}{path}", timeout=timeout)
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -333,44 +353,38 @@ class OllamaEngine(BaseEngine):
     def generate_stream(
         self, messages: Messages, max_tokens: int, temperature: float
     ) -> Iterator[str]:
-        import httpx
-
         with self._lock:
-            with httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
-                with client.stream(
-                    "POST", f"{self.host}/api/chat",
-                    json=self._payload(messages, max_tokens, temperature, stream=True),
-                ) as response:
-                    response.raise_for_status()
-                    for line in response.iter_lines():
-                        if not line:
-                            continue
-                        chunk = json.loads(line)
-                        if chunk.get("error"):
-                            raise EngineError(f"ollama: {chunk['error']}")
-                        piece = chunk.get("message", {}).get("content", "")
-                        if piece:
-                            yield piece
-                        if chunk.get("done"):
-                            # Counts only appear on the final chunk.
-                            self.last_prompt_tokens = chunk.get("prompt_eval_count", 0)
-                            self.last_completion_tokens = chunk.get("eval_count", 0)
+            with self.client.stream(
+                "POST", f"{self.host}/api/chat",
+                json=self._payload(messages, max_tokens, temperature, stream=True),
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    if chunk.get("error"):
+                        raise EngineError(f"ollama: {chunk['error']}")
+                    piece = chunk.get("message", {}).get("content", "")
+                    if piece:
+                        yield piece
+                    if chunk.get("done"):
+                        # Counts only appear on the final chunk.
+                        self.last_prompt_tokens = chunk.get("prompt_eval_count", 0)
+                        self.last_completion_tokens = chunk.get("eval_count", 0)
 
     def _complete(self, item: BatchItem) -> BatchOutput:
         """One non-streaming completion. No shared state, so it is safe to run
         concurrently with other calls."""
-        import httpx
-
         try:
-            with httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
-                r = client.post(
-                    f"{self.host}/api/chat",
-                    json=self._payload(
-                        item.messages, item.max_tokens, item.temperature, stream=False
-                    ),
-                )
-                r.raise_for_status()
-                body = r.json()
+            r = self.client.post(
+                f"{self.host}/api/chat",
+                json=self._payload(
+                    item.messages, item.max_tokens, item.temperature, stream=False
+                ),
+            )
+            r.raise_for_status()
+            body = r.json()
             if body.get("error"):
                 return BatchOutput(error=f"ollama: {body['error']}")
             return BatchOutput(

@@ -38,7 +38,7 @@ echo '{"prompt": "Name one fruit."}'         >> prompts.jsonl
 fleetlm batch prompts.jsonl -o results.jsonl
 ```
 
-```
+```text
   [########################] 2/2  ok 2  failed 0  running 0  1.9/s  ETA 0m00s
   wrote 2 results to results.jsonl
 ```
@@ -78,7 +78,7 @@ A node does not run those units one at a time. It works its whole lease at once,
 | | Status |
 |---|---|
 | Orchestrator, registry, routing, heartbeat eviction | Working, tested |
-| Node agent - Ollama / MLX / llama.cpp / mock engines | Working; Ollama and MLX verified on Apple silicon |
+| Node agent - Ollama / MLX / llama.cpp / mock engines | Working; Ollama and MLX verified on Apple Silicon |
 | `fleetlm up` - orchestrator + node in one command | Working, tested |
 | `fleetlm batch` - JSONL in, JSONL out, live progress | Working, tested |
 | `/v1/chat/completions` - JSON + SSE streaming | Working, tested |
@@ -103,7 +103,7 @@ Until (3) exists, FleetLM is for **fleets you control** - your own machines, or 
 
 ## Layout
 
-```
+```text
 orchestrator/   main · protocol · batch · session · metrics · fleet/ · api/
 node_agent/     __main__ · engine (ollama|mlx|llama_cpp|mock) · cli
 web_compute/    dashboard + contribute page

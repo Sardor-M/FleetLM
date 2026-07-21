@@ -164,6 +164,12 @@ async def _run_up(args) -> int:
     finally:
         if node_task is not None:
             node_task.cancel()
+            # Let it unwind so it can release the lease and we avoid a
+            # "Task was destroyed but it is pending" warning at loop close.
+            try:
+                await node_task
+            except asyncio.CancelledError:
+                pass
     return 0
 
 
@@ -260,9 +266,19 @@ def cmd_batch(args) -> int:
 
             started = time.monotonic()
             status = batch
+            # A long batch should survive a blip: tolerate a few consecutive
+            # poll failures before giving up, rather than aborting on the first.
+            failures = 0
             while status["status"] == "in_progress":
                 time.sleep(args.poll)
-                status = client.get(f"{base}/v1/batches/{batch_id}").json()
+                try:
+                    status = client.get(f"{base}/v1/batches/{batch_id}").json()
+                    failures = 0
+                except httpx.HTTPError:
+                    failures += 1
+                    if failures >= 5:
+                        raise
+                    continue
                 sys.stdout.write(_progress(status["request_counts"], total, started))
                 sys.stdout.flush()
             sys.stdout.write(_progress(status["request_counts"], total, started) + "\n")
@@ -338,8 +354,11 @@ def cmd_doctor(args) -> int:
         # nothing.
         print(f"  ollama parallel  {parallel or 'unset - set OLLAMA_NUM_PARALLEL=4 for batch throughput'}")
         if not ollama_models:
-            print("\n  No model pulled yet:  ollama pull llama3.2")
-            return 1
+            print("\n  No Ollama model pulled yet:  ollama pull llama3.2")
+            # Only a hard stop when Ollama is the one thing that could serve;
+            # an mlx/llama.cpp install can still carry this machine.
+            if engines == ["ollama"]:
+                return 1
 
     print()
     if not engines:
