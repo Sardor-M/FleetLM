@@ -162,10 +162,10 @@ class BatchStore:
         now = time.time()
         async with self._lock:
             still_pending: list[str] = []
-            for uid in self._pending:
+            for i, uid in enumerate(self._pending):
                 if len(leased) >= count:
-                    still_pending.append(uid)
-                    continue
+                    still_pending.extend(self._pending[i:])
+                    break
                 unit = self.units.get(uid)
                 if unit is None or unit.state != UnitState.PENDING:
                     continue  # stale queue entry
