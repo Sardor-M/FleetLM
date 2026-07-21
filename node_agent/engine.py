@@ -390,7 +390,8 @@ class OllamaEngine(BaseEngine):
         """
         if len(items) == 1:
             return [self._complete(items[0])]
-        with ThreadPoolExecutor(max_workers=len(items)) as pool:
+        max_workers = min(32, len(items))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             return list(pool.map(self._complete, items))
 
 
