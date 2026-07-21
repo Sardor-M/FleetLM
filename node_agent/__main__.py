@@ -243,27 +243,6 @@ class NodeAgent:
             self.active_sessions -= 1
 
 
-    # ── Batch work ──────────────────────────────────────────────────────
-
-    def _request_work(self) -> None:
-        """Ask for as many units as we have room for. Free to call spuriously."""
-        if not self.model_loaded:
-            return
-        room = self.batch_size - self.work_queue.qsize() - self.work_in_progress
-        if room > 0:
-            self.outbox.put_nowait({
-                "type": "work_request",
-                "node_id": self.node_id,
-                "capacity": room,
-            })
-
-    async def _work_poll_loop(self):
-        """Idle nodes ask for work periodically; `work_available` covers the rest."""
-        while True:
-            await asyncio.sleep(IDLE_POLL_SEC)
-            self._request_work()
-
-    async def _work_loop(self):
         """Decode leased units as one batch, reporting each result separately."""
         while True:
             units = [await self.work_queue.get()]
@@ -274,16 +253,17 @@ class NodeAgent:
             self.work_in_progress += len(units)
             try:
                 outputs, seconds = await asyncio.to_thread(self._run_units, units)
-                self._report_units(units, outputs, seconds)
             except Exception as e:
                 logger.error(f"Batch of {len(units)} units failed: {e}")
                 for unit in units:
                     self.outbox.put_nowait({
                         "type": "work_failed",
                         "node_id": self.node_id,
-                        "unit_id": unit.get("unit_id", "unknown"),
+                        "unit_id": unit["unit_id"],
                         "message": str(e),
                     })
+            else:
+                self._report_units(units, outputs, seconds)
             finally:
                 self.work_in_progress -= len(units)
                 self._request_work()
