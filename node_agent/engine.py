@@ -200,7 +200,7 @@ class MlxEngine(BaseEngine):
                 prompt_tokens=len(prompts[slot]),
                 # BatchStats reports batch-wide totals only, so per-unit
                 # completions are re-encoded to attribute them.
-                completion_tokens=len(self.tokenizer.encode(text)),
+                completion_tokens=len(self.tokenizer.encode(text, add_special_tokens=False)),
             )
 
 
