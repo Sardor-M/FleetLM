@@ -104,6 +104,10 @@ class Batch:
     state: BatchState = BatchState.IN_PROGRESS
     unit_ids: list[str] = field(default_factory=list)
     completed_at: float | None = None
+    # Verification units planted in this batch. Held apart from `unit_ids` so
+    # they cannot reach the client's results, counts, or completion state -
+    # the submitter asked for their prompts, not ours.
+    canary_unit_ids: list[str] = field(default_factory=list)
 
 
 class BatchStore:
@@ -113,18 +117,20 @@ class BatchStore:
     semantics here stay the same.
     """
 
-    def __init__(self, metrics=None):
+    def __init__(self, metrics=None, verifier=None):
         self.batches: dict[str, Batch] = {}
         self.units: dict[str, WorkUnit] = {}
         self._pending: list[str] = []  # FIFO of unit ids ready to lease
         self._lock = asyncio.Lock()
         self.metrics = metrics
+        self.verifier = verifier
 
     # ── Submission ──────────────────────────────────────────────────────
 
     async def create_batch(self, requests: list[dict], model: str | None) -> Batch:
         batch = Batch(id=f"batch_{uuid.uuid4().hex[:12]}", model=model)
         async with self._lock:
+            queued: list[str] = []
             for i, req in enumerate(requests):
                 unit = WorkUnit(
                     id=f"unit_{uuid.uuid4().hex[:12]}",
@@ -141,12 +147,46 @@ class BatchStore:
                 )
                 self.units[unit.id] = unit
                 batch.unit_ids.append(unit.id)
-                self._pending.append(unit.id)
+                queued.append(unit.id)
+
+            for offset, canary in enumerate(self._plant(len(requests))):
+                unit = WorkUnit(
+                    id=f"unit_{uuid.uuid4().hex[:12]}",
+                    batch_id=batch.id,
+                    index=len(batch.unit_ids) + offset,
+                    messages=canary.as_request()["messages"],
+                    model=canary.model or model,
+                    max_tokens=256,
+                    temperature=0.0,
+                )
+                self.units[unit.id] = unit
+                batch.canary_unit_ids.append(unit.id)
+                self.verifier.register(unit.id, canary)
+                # Spread through the batch rather than appended to it. Tacked
+                # on the end, canaries land together on whichever node drains
+                # the tail, and a node that learns that pattern can compute
+                # honestly for the last few units and cheat on the rest.
+                # Real units keep their order relative to each other, so a
+                # batch without canaries is still strictly FIFO.
+                stride = max(1, len(queued) // (len(batch.canary_unit_ids) + 1))
+                queued.insert(min(len(queued), stride * (offset + 1)), unit.id)
+
+            self._pending.extend(queued)
             self.batches[batch.id] = batch
         if self.metrics:
             self.metrics.batches_created += 1
-        logger.info(f"Batch {batch.id} created with {len(batch.unit_ids)} units")
+        planted = len(batch.canary_unit_ids)
+        logger.info(
+            f"Batch {batch.id} created with {len(batch.unit_ids)} units"
+            + (f" plus {planted} canaries" if planted else "")
+        )
         return batch
+
+    def _plant(self, batch_size: int) -> list:
+        """Canaries to mix into a batch of this size, or none if unverified."""
+        if self.verifier is None:
+            return []
+        return self.verifier.select(batch_size)
 
     # ── Leasing ─────────────────────────────────────────────────────────
 
@@ -224,7 +264,13 @@ class BatchStore:
             queue_sec = max(0.0, unit.leased_at - unit.created_at) if unit.leased_at else 0.0
             service_sec = max(0.0, now - unit.leased_at) if unit.leased_at else 0.0
             retries = max(0, unit.attempts - 1)
+            prompt = " ".join(m.get("content", "") for m in unit.messages)
             self._maybe_finish_batch(unit.batch_id)
+        # Outside the lock: judging a result is bookkeeping about the node, not
+        # about the queue, and it must not hold up other nodes reporting in.
+        if self.verifier is not None:
+            self.verifier.check(unit_id, node_id, text)
+            self.verifier.note_replay(unit_id, node_id, text, prompt)
         if self.metrics:
             self.metrics.unit_completed(
                 node_id,
@@ -319,7 +365,9 @@ class BatchStore:
             if batch is None or batch.state != BatchState.IN_PROGRESS:
                 return False
             batch.state = BatchState.CANCELLED
-            for uid in batch.unit_ids:
+            # Canaries too: a cancelled batch should stop costing the fleet
+            # anything, and a stranded canary would sit in the queue forever.
+            for uid in batch.unit_ids + batch.canary_unit_ids:
                 unit = self.units.get(uid)
                 if unit and unit.state in (UnitState.PENDING, UnitState.LEASED):
                     unit.state = UnitState.FAILED

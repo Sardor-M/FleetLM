@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +23,7 @@ from orchestrator.fleet.heartbeat import heartbeat_monitor
 from orchestrator.fleet.registry import NodeRegistry
 from orchestrator.fleet.router import Router
 from orchestrator.session import SessionManager
+from orchestrator.verification import Canary, Verifier
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -29,6 +31,48 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("orchestrator")
+
+
+def build_verifier() -> Verifier | None:
+    """Load canaries from disk, or run unverified and say so.
+
+    Returning None rather than an empty Verifier is deliberate: an operator
+    who has configured nothing should see "every result is trusted" in the
+    log, not a verification subsystem that silently checks nothing.
+    """
+    if not settings.canary_file:
+        logger.warning(
+            "No DLLM_CANARY_FILE set - results from every node are trusted "
+            "completely. Fine for machines you control; not for a public fleet."
+        )
+        return None
+    try:
+        raw = json.loads(Path(settings.canary_file).read_text(encoding="utf-8"))
+        canaries = [
+            Canary(prompt=c["prompt"], expected=c["expected"], model=c.get("model"))
+            for c in raw
+        ]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # Loud, and unverified rather than dead: a malformed canary file should
+        # not take the fleet down, but it must never look like it is working.
+        logger.error(
+            f"Could not load canaries from {settings.canary_file}: {e}. "
+            "Running unverified."
+        )
+        return None
+    if not canaries:
+        logger.error(f"{settings.canary_file} defines no canaries. Running unverified.")
+        return None
+    logger.info(
+        f"Verification on: {len(canaries)} canaries at {settings.canary_rate:.1%}, "
+        f"agreement threshold {settings.canary_agreement_threshold} "
+        "(assumed, not yet measured)"
+    )
+    return Verifier(
+        canaries=canaries,
+        rate=settings.canary_rate,
+        agreement_threshold=settings.canary_agreement_threshold,
+    )
 
 
 async def lease_reaper(store: BatchStore) -> None:
@@ -47,7 +91,10 @@ async def lifespan(app: FastAPI):
     app.state.metrics = FleetMetrics()
     app.state.registry = NodeRegistry()
     app.state.session_manager = SessionManager()
-    app.state.batch_store = BatchStore(metrics=app.state.metrics)
+    app.state.verifier = build_verifier()
+    app.state.batch_store = BatchStore(
+        metrics=app.state.metrics, verifier=app.state.verifier
+    )
     app.state.router = Router(app.state.registry)
 
     if not settings.join_token:
@@ -131,6 +178,25 @@ async def health():
 async def metrics():
     """Fleet counters: throughput, unit success rate, join times, per-node totals."""
     return app.state.metrics.snapshot()
+
+
+@app.get("/verification")
+async def verification():
+    """What checking untrusted nodes has turned up, and what it cannot tell you."""
+    verifier = app.state.verifier
+    if verifier is None:
+        return {
+            "enabled": False,
+            "reason": "no canary file configured - every result is trusted",
+        }
+    snapshot = verifier.snapshot()
+    snapshot["caveats"] = [
+        "Canaries prove a node answered known prompts correctly. They cannot "
+        "prove it computed honestly on anything else.",
+        "The agreement threshold is an assumption. How far two honest backends "
+        "drift on identical input has not been measured yet.",
+    ]
+    return snapshot
 
 
 if __name__ == "__main__":
