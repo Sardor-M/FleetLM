@@ -15,6 +15,25 @@ still unmeasured is listed as pending rather than claimed.
 
 ### Added
 
+- Canary verification of results from nodes the operator does not control, the
+  cheapest of the layers that problem needs. Units with a known reference answer
+  are mixed into batches, spread through the queue rather than appended so they
+  cannot be found by position, and shaped identically to real work so a node
+  cannot answer them honestly and cheat elsewhere. Their results never reach the
+  client, and they are excluded from its counts and from batch completion. A
+  node that disagrees with the reference is marked suspect; `/verification`
+  reports what was checked, what failed, and what the check cannot tell you.
+  Off unless `DLLM_CANARY_FILE` is set - a canary needs a reference recorded
+  from a trusted run, and nothing here can invent one.
+- Replay detection: an answer reused for a *different* question is flagged. The
+  first version keyed on the unit rather than the prompt and so called greedy
+  determinism fraud, failing every honest node that answered a repeated canary.
+  The false-positive test caught it, not review.
+- An adversarial test suite - a node that truncates, one that returns a smaller
+  model's output, one that returns nothing, one that refuses, and one that
+  replays - asserting detection on every modelled cheat and no accusation
+  against an honest node.
+
 - `fleetlm bench` - a fixed workload any contributor can run against their own
   fleet and send back. The prompt set is generated rather than read from a file,
   so two people's runs are comparable; temperature is 0 and every request is

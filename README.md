@@ -23,8 +23,9 @@ Each node holds a **whole model** in unified memory and dials out over a single 
 Models come from [Ollama](https://ollama.com), so there is no Python inference stack to install and no repo id to get wrong.
 
 ```bash
+git clone https://github.com/Sardor-M/FleetLM && cd FleetLM
+pip install -e .          # the fleet - not on PyPI yet, so install from source
 ollama pull llama3.2      # the model
-pip install -e .          # the fleet
 fleetlm up                # orchestrator + a local node, one command
 ```
 
@@ -96,6 +97,7 @@ A node does not run those units one at a time. It works its whole lease at once,
 | Batched decode - a node runs its whole lease in one pass | Working, tested |
 | Fleet metrics, join token, `fleetlm doctor` | Working, tested |
 | `fleetlm bench` - fixed workload, tail latency, spread | Working, tested |
+| Canary verification of untrusted node results | Working, tested; one layer of several |
 | Speedup on 1 laptop vs several | Harness ready; needs a second machine to measure |
 | Cost per token | Coming soon (expected to measure) |
 | Browser nodes (`/compute`) | Coming soon (expected to test) |
@@ -110,7 +112,11 @@ The goal is a published, reproducible demonstration that a fleet of laptops peop
 2. **Cost accounting** - measured energy per million tokens, compared honestly against cloud *batch* pricing.
 3. **Output verification** - deciding cheaply whether a result from an untrusted machine can be trusted. This is the open problem for consumer-hardware inference, and the thing that would let a fleet accept strangers rather than only machines you already trust.
 
-Until (3) exists, FleetLM is for **fleets you control** - your own machines, or a team's. Browser nodes and sharding come after.
+The first layer of (3) exists. Set `DLLM_CANARY_FILE` to a JSON list of `{prompt, expected, model}` and the orchestrator mixes those units into batches, spread through the queue so they cannot be spotted by position and shaped identically to real work. Their results never reach the client. A node whose answer disagrees with the reference is marked suspect, and `/verification` reports what was checked and what it found. It is off by default, because a canary needs a reference answer recorded from a run you trust and nothing here can invent one.
+
+That catches a node returning a different model's output, a truncated answer, or an answer replayed from a different question. It does **not** catch a node that answers canaries honestly and cheats on everything else - that needs redundant execution, and the threshold for judging disagreement is still an assumption rather than a measurement.
+
+So until (3) is finished, FleetLM is for **fleets you control** - your own machines, or a team's. Browser nodes and sharding come after.
 
 ## Layout
 

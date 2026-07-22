@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     # host): set DLLM_JOIN_TOKEN so only invited machines can contribute.
     join_token: str = ""
 
+    # Verifying work that ran on machines the operator does not control.
+    # Off by default: canaries need reference answers recorded from a run the
+    # operator trusts, and this cannot invent them. Point
+    # DLLM_CANARY_FILE at a JSON list of {prompt, expected, model} to switch
+    # it on. The threshold is an assumption, not a measurement - how far two
+    # honest backends drift on identical input is still an open question.
+    canary_file: str = ""
+    canary_rate: float = 0.02  # canaries per real unit
+    canary_agreement_threshold: float = 0.85
+
     # Model config
     default_model: str = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 
