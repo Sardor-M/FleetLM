@@ -15,6 +15,25 @@ still unmeasured is listed as pending rather than claimed.
 
 ### Added
 
+- `fleetlm bench` - a fixed workload any contributor can run against their own
+  fleet and send back. The prompt set is generated rather than read from a file,
+  so two people's runs are comparable; temperature is 0 and every request is
+  distinct, so a cache cannot manufacture a speedup. It reports the median wall
+  clock with the run-to-run spread, per-node throughput, retries, reclaimed
+  leases, and - printed alongside every result - what the run does not
+  establish, including refusing to call a single-node run a speedup.
+- Per-unit timing split into queue time (waiting for any node) and service time
+  (that node's turnaround), reported at p50/p90/p99 on `/metrics`. Adding
+  machines should shrink the first and leave the second flat; a single mean
+  cannot show that, and a mean also hides the case this design exists to
+  survive - most units fast, a few stuck behind one departing machine.
+- `units_per_hour` per node, so a slow machine in a mixed fleet is visible as a
+  smaller share rather than absorbed into the fleet total, and a fleet-wide
+  retry counter.
+- Tests that a batch finishes with no client-visible error when a node is killed
+  mid-run or simply hangs until its lease expires, and that the run record still
+  discloses the churn.
+
 - Batched decoding on the node. A node now decodes its whole lease in a single
   pass instead of running units one at a time. `generate_batch()` joins the
   engine interface; the base implementation stays sequential so the llama.cpp

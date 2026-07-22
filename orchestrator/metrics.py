@@ -8,7 +8,30 @@ sees, so a node cannot inflate its own contribution by reporting a number.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
+
+# Enough samples to characterise a tail without growing without bound on a
+# long-lived fleet. Oldest samples fall off first.
+LATENCY_SAMPLES = 10_000
+
+
+def _r(value: float | None) -> float | None:
+    """Round a latency for reporting, keeping None as None."""
+    return None if value is None else round(value, 3)
+
+
+def percentile(values: list[float], pct: float) -> float | None:
+    """Nearest-rank percentile. No numpy - this is the only statistics we need.
+
+    Nearest-rank rather than interpolated on purpose: every number reported is
+    a latency some unit actually had, not one synthesised between two samples.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, min(len(ordered), -(-len(ordered) * pct // 100)))
+    return ordered[int(rank) - 1]
 
 
 @dataclass
@@ -41,6 +64,15 @@ class NodeMetrics:
             return 0.0
         return self.completion_tokens / self.generation_seconds
 
+    @property
+    def units_per_hour(self) -> float:
+        """Throughput against wall clock, so a slow machine in a mixed fleet
+        is visible as a smaller share rather than hidden in the fleet total."""
+        hours = (time.time() - self.joined_at) / 3600
+        if hours <= 0:
+            return 0.0
+        return self.units_completed / hours
+
     def snapshot(self) -> dict:
         return {
             "node_id": self.node_id[:8],
@@ -58,6 +90,7 @@ class NodeMetrics:
             "completion_tokens": self.completion_tokens,
             "generation_sec": round(self.generation_seconds, 1),
             "tokens_per_sec": round(self.tokens_per_second, 1),
+            "units_per_hour": round(self.units_per_hour, 1),
         }
 
 
@@ -71,6 +104,12 @@ class FleetMetrics:
         self.batches_created = 0
         self.batches_completed = 0
         self.leases_reclaimed = 0  # units returned by disconnect or lease expiry
+        self.unit_retries = 0  # attempts beyond the first, across all units
+        # Per-unit intervals, kept as samples so the tail can be reported.
+        # A mean hides the case this project has to survive: most units fast,
+        # a few stuck behind one slow or departing machine.
+        self.queue_times: deque[float] = deque(maxlen=LATENCY_SAMPLES)
+        self.service_times: deque[float] = deque(maxlen=LATENCY_SAMPLES)
 
     # ── Node lifecycle ──────────────────────────────────────────────────
 
@@ -95,7 +134,16 @@ class FleetMetrics:
         prompt_tokens: int,
         completion_tokens: int,
         seconds: float = 0.0,
+        queue_sec: float = 0.0,
+        service_sec: float = 0.0,
+        retries: int = 0,
     ) -> None:
+        # Timings are fleet-wide facts, so they are recorded even for a node
+        # that has since disconnected - dropping them would quietly bias the
+        # tail towards the machines that survived the run.
+        self.queue_times.append(max(0.0, queue_sec))
+        self.service_times.append(max(0.0, service_sec))
+        self.unit_retries += max(0, retries)
         node = self.nodes.get(node_id)
         if node is None:
             return
@@ -129,6 +177,26 @@ class FleetMetrics:
 
     # ── Reporting ───────────────────────────────────────────────────────
 
+    def latency_summary(self) -> dict:
+        """Where a unit's time went, at the median and in the tail.
+
+        `queue` is time spent waiting for any node to take the unit; `service`
+        is time from being taken to the result landing. Adding machines is
+        supposed to cut `queue` while leaving `service` flat - reporting them
+        separately is what makes a speedup claim checkable rather than asserted.
+        """
+        def dist(samples) -> dict:
+            values = list(samples)
+            return {
+                "count": len(values),
+                "p50": _r(percentile(values, 50)),
+                "p90": _r(percentile(values, 90)),
+                "p99": _r(percentile(values, 99)),
+                "max": _r(max(values)) if values else None,
+            }
+
+        return {"queue": dist(self.queue_times), "service": dist(self.service_times)}
+
     def snapshot(self) -> dict:
         live = [n.snapshot() for n in self.nodes.values()]
         everyone = live + self.departed
@@ -152,6 +220,8 @@ class FleetMetrics:
             "batches_created": self.batches_created,
             "batches_completed": self.batches_completed,
             "leases_reclaimed": self.leases_reclaimed,
+            "unit_retries": self.unit_retries,
+            "unit_latency_sec": self.latency_summary(),
             "units_completed": units,
             "units_failed": failures,
             "unit_success_rate": (
